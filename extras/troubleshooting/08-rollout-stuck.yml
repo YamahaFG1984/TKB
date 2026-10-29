@@ -1,0 +1,27 @@
+# Apply this once as-is (healthy), then change the image to nginx:9.99.99 and apply again.
+# Symptom: the rollout never finishes and eventually reports ProgressDeadlineExceeded.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tb-rollout
+spec:
+  replicas: 3
+  progressDeadlineSeconds: 60
+  selector:
+    matchLabels:
+      app: tb-rollout
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: tb-rollout
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.27
+        ports:
+        - containerPort: 80

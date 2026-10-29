@@ -13,7 +13,7 @@
 <main>
 
 <div class="hero">
-  <span class="chapter-eyebrow">面向初学者的 16 章图解教程</span>
+  <span class="chapter-eyebrow">面向初学者的图解教程 · 16 章 + 2 篇补充</span>
   <h1>Kubernetes 入门实战</h1>
   <p class="sub">
     这套教程依据 Nigel Poulton 的《The Kubernetes Book》2026 版和配套示例仓库整理而成。
@@ -75,7 +75,7 @@
 <ul>
   <li><strong>听说过容器、但没用过 Kubernetes</strong> 的开发者：每个概念都配图解释，术语出现时就地翻译。</li>
   <li><strong>需要上手运维集群</strong> 的工程师：每章都有可直接运行的命令和真实输出，知道「敲下去会看到什么」。</li>
-  <li><strong>准备系统梳理知识</strong> 的人：从架构原理到安全实践，覆盖原书全部 16 章。</li>
+  <li><strong>准备系统梳理知识</strong> 的人：从架构原理到安全实践，覆盖原书全部 16 章，另有排错、探针与自动扩缩两篇补充。</li>
 </ul>
 
 <div class="box note">
@@ -108,24 +108,31 @@
   <text class="sm" x="630" y="92" text-anchor="middle">9 服务发现深入</text>
   <text class="sm" x="630" y="116" text-anchor="middle">流量怎么进来、怎么找到彼此</text>
 
-  <rect class="bx-g" x="145" y="170" width="220" height="110" rx="12"/>
-  <text class="ttl on-g" x="255" y="196" text-anchor="middle">第四部分 · 存储与配置</text>
-  <text class="sm" x="255" y="222" text-anchor="middle">10 存储　11 ConfigMap/Secret</text>
-  <text class="sm" x="255" y="242" text-anchor="middle">12 StatefulSet</text>
-  <text class="sm" x="255" y="266" text-anchor="middle">数据和配置放哪里</text>
+  <rect class="bx-g" x="20" y="170" width="220" height="110" rx="12"/>
+  <text class="ttl on-g" x="130" y="196" text-anchor="middle">第四部分 · 存储与配置</text>
+  <text class="sm" x="130" y="222" text-anchor="middle">10 存储　11 ConfigMap/Secret</text>
+  <text class="sm" x="130" y="242" text-anchor="middle">12 StatefulSet</text>
+  <text class="sm" x="130" y="266" text-anchor="middle">数据和配置放哪里</text>
 
-  <rect class="bx-r" x="395" y="170" width="220" height="110" rx="12"/>
-  <text class="ttl on-r" x="505" y="196" text-anchor="middle">第五部分 · API 与安全</text>
-  <text class="sm" x="505" y="222" text-anchor="middle">13 RBAC　14 API</text>
-  <text class="sm" x="505" y="242" text-anchor="middle">15 威胁建模　16 安全实践</text>
-  <text class="sm" x="505" y="266" text-anchor="middle">走向生产环境</text>
+  <rect class="bx-r" x="270" y="170" width="220" height="110" rx="12"/>
+  <text class="ttl on-r" x="380" y="196" text-anchor="middle">第五部分 · API 与安全</text>
+  <text class="sm" x="380" y="222" text-anchor="middle">13 RBAC　14 API</text>
+  <text class="sm" x="380" y="242" text-anchor="middle">15 威胁建模　16 安全实践</text>
+  <text class="sm" x="380" y="266" text-anchor="middle">走向生产环境</text>
+
+  <rect class="bx-d" x="520" y="170" width="220" height="110" rx="12"/>
+  <text class="ttl" x="630" y="196" text-anchor="middle">第六部分 · 补充篇</text>
+  <text class="sm" x="630" y="222" text-anchor="middle">17 排错实战</text>
+  <text class="sm" x="630" y="242" text-anchor="middle">18 探针、资源与自动扩缩</text>
+  <text class="sm" x="630" y="266" text-anchor="middle">非原书内容 · 上生产必备</text>
 
   <path class="ln-a" d="M242 75 H266" marker-end="url(#ar-a)"/>
   <path class="ln-a" d="M492 75 H516" marker-end="url(#ar-a)"/>
-  <path class="ln-a" d="M630 132 C630 150 300 140 270 166" marker-end="url(#ar-a)"/>
-  <path class="ln-a" d="M367 225 H391" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M630 132 C630 152 140 144 130 166" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M242 225 H266" marker-end="url(#ar-a)"/>
+  <path class="ln-d" d="M492 225 H516" marker-end="url(#ar)"/>
 </svg>
-<figcaption>图 0-2　五个部分，循序渐进</figcaption>
+<figcaption>图 0-2　原书五个部分 + 本教程补充的第六部分，循序渐进</figcaption>
 </figure>
 
 <h2 id="how">怎么用这套教程</h2>
@@ -179,7 +186,7 @@ $ git checkout -b 2026 origin/2026
   <div class="t">&#9733; 一句话总结</div>
   <p>
     如果你只记住一件事：<strong>你用 YAML 声明期望状态，Kubernetes 的控制器永不停歇地把现实调和成你想要的样子。</strong>
-    接下来的 16 章，都是这句话在不同对象上的展开。
+    接下来的每一章，都是这句话在不同对象上的展开。
   </p>
 </div>
 

@@ -1,0 +1,50 @@
+# Readiness probe demo: three nginx replicas behind a Service.
+# Delete index.html inside one Pod -> GET / returns 403 -> that Pod becomes NotReady
+# and is removed from the Service's EndpointSlice (but is NOT restarted).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-probes
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: web-probes
+  template:
+    metadata:
+      labels:
+        app: web-probes
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.27
+        ports:
+        - containerPort: 80
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 80
+          periodSeconds: 5
+          failureThreshold: 2
+        livenessProbe:
+          tcpSocket:
+            port: 80
+          periodSeconds: 10
+          failureThreshold: 3
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-probes
+spec:
+  selector:
+    app: web-probes
+  ports:
+  - port: 80
+    targetPort: 80

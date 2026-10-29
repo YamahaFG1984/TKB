@@ -1,0 +1,32 @@
+# Broken on purpose: the StorageClass does not exist.
+# Symptom: PVC stays Pending, and so does the Pod that uses it.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tb-pvc
+spec:
+  accessModes:
+  - ReadWriteOnce
+  storageClassName: does-not-exist
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: tb-pvc-pod
+  labels:
+    chapter: troubleshooting
+spec:
+  volumes:
+  - name: data
+    persistentVolumeClaim:
+      claimName: tb-pvc
+  containers:
+  - name: ctr
+    image: busybox:1.36
+    command: ["sh", "-c", "sleep 3600"]
+    volumeMounts:
+    - name: data
+      mountPath: /data

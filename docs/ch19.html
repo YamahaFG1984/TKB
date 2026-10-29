@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>附录 · 术语表与下一步 — Kubernetes 入门实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="19">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">附录</span>
+<h1>术语表、速查与下一步</h1>
+<p class="lede">
+  恭喜你读完了全部内容！这一页把散落在各章的知识收拢起来：一张全书概念地图、一份 kubectl 速查表、一份术语表，以及继续学习的路线。
+  建议收藏，遇到想不起来的词就回来翻一翻。
+</p>
+
+<div id="chapter-toc"></div>
+
+<h2 id="map">一张图串起全书</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 470" role="img" aria-label="Kubernetes 主要对象之间的关系总览">
+  <!-- 外部流量 -->
+  <rect class="bx" x="20" y="20" width="110" height="46" rx="10"/>
+  <text class="lbl" x="75" y="48" text-anchor="middle">用户 / 浏览器</text>
+  <rect class="bx-a" x="170" y="14" width="180" height="58" rx="10"/>
+  <text class="ttl on-a" x="260" y="38" text-anchor="middle">Gateway + HTTPRoute</text>
+  <text class="sm" x="260" y="58" text-anchor="middle">第 8 章 · 外部流量入口</text>
+  <path class="ln" d="M132 43 H166" marker-end="url(#ar)"/>
+
+  <!-- kubectl / API -->
+  <rect class="bx" x="420" y="20" width="110" height="46" rx="10"/>
+  <text class="lbl" x="475" y="48" text-anchor="middle">kubectl</text>
+  <rect class="bx-b" x="570" y="14" width="170" height="58" rx="10"/>
+  <text class="ttl on-b" x="655" y="38" text-anchor="middle">API 服务器</text>
+  <text class="sm" x="655" y="58" text-anchor="middle">第 13、14 章 · RBAC · CRD</text>
+  <path class="ln" d="M532 43 H566" marker-end="url(#ar)"/>
+
+  <!-- 集群 + Namespace -->
+  <rect class="bx-d" x="20" y="96" width="720" height="360" rx="16"/>
+  <text class="sm" x="36" y="116">集群（第 2、3 章）——控制平面 + 工作节点</text>
+  <rect class="bx" x="40" y="126" width="680" height="316" rx="14"/>
+  <text class="ttl" x="56" y="148">Namespace（第 5 章）</text>
+
+  <rect class="bx-a" x="70" y="164" width="200" height="56" rx="10"/>
+  <text class="ttl on-a" x="170" y="188" text-anchor="middle">Service</text>
+  <text class="sm" x="170" y="208" text-anchor="middle">第 7、9 章 · 稳定入口 + DNS</text>
+  <path class="ln-a" d="M300 74 L250 160" marker-end="url(#ar-a)"/>
+
+  <rect class="bx-p" x="320" y="164" width="180" height="56" rx="10"/>
+  <text class="ttl on-p" x="410" y="188" text-anchor="middle">Deployment</text>
+  <text class="sm" x="410" y="208" text-anchor="middle">第 6 章 · 无状态</text>
+  <rect class="bx-p" x="520" y="164" width="180" height="56" rx="10"/>
+  <text class="ttl on-p" x="610" y="188" text-anchor="middle">StatefulSet</text>
+  <text class="sm" x="610" y="208" text-anchor="middle">第 12 章 · 有状态</text>
+
+  <rect class="bx-b" x="70" y="260" width="630" height="90" rx="12"/>
+  <text class="ttl on-b" x="86" y="284">Pod（第 4 章）</text>
+  <rect class="bx-g" x="200" y="272" width="150" height="66" rx="8"/>
+  <text class="ttl on-g" x="275" y="298" text-anchor="middle">容器</text>
+  <text class="sm" x="275" y="318" text-anchor="middle">第 1 章 · 应用</text>
+  <rect class="bx" x="370" y="272" width="150" height="66" rx="8"/>
+  <text class="ttl" x="445" y="298" text-anchor="middle">init / sidecar</text>
+  <text class="sm" x="445" y="318" text-anchor="middle">多容器模式</text>
+  <rect class="bx-r" x="540" y="272" width="150" height="66" rx="8"/>
+  <text class="ttl on-r" x="615" y="298" text-anchor="middle">securityContext</text>
+  <text class="sm" x="615" y="318" text-anchor="middle">第 15、16 章</text>
+
+  <path class="ln" d="M170 222 L170 256" marker-end="url(#ar)"/>
+  <text class="sm" x="178" y="244">标签选择器</text>
+  <path class="ln-p" d="M410 222 V256" marker-end="url(#ar)"/>
+  <path class="ln-p" d="M610 222 V256" marker-end="url(#ar)"/>
+
+  <rect class="bx-g" x="70" y="372" width="300" height="56" rx="10"/>
+  <text class="ttl on-g" x="220" y="396" text-anchor="middle">ConfigMap · Secret</text>
+  <text class="sm" x="220" y="416" text-anchor="middle">第 11 章 · 环境变量 / 卷注入</text>
+  <rect class="bx-g" x="400" y="372" width="300" height="56" rx="10"/>
+  <text class="ttl on-g" x="550" y="396" text-anchor="middle">PVC → PV ← StorageClass</text>
+  <text class="sm" x="550" y="416" text-anchor="middle">第 10 章 · 持久存储（CSI）</text>
+  <path class="ln" d="M220 352 V368" marker-start="url(#ar)"/>
+  <path class="ln" d="M550 352 V368" marker-start="url(#ar)"/>
+</svg>
+<figcaption>图 A-1　全书主要对象之间的关系</figcaption>
+</figure>
+
+<h2 id="cheatsheet">kubectl 速查</h2>
+
+<div class="tw">
+<table>
+  <tr><th>想做什么</th><th>命令</th><th>章节</th></tr>
+  <tr><td>查看节点</td><td><code>kubectl get nodes</code></td><td>3</td></tr>
+  <tr><td>查看 / 切换 context</td><td><code>kubectl config get-contexts</code> / <code>use-context &lt;名&gt;</code></td><td>3</td></tr>
+  <tr><td>声明式部署</td><td><code>kubectl apply -f &lt;文件&gt;</code></td><td>4</td></tr>
+  <tr><td>查看对象</td><td><code>kubectl get &lt;类型&gt; [-o wide|yaml]</code></td><td>4</td></tr>
+  <tr><td>详细信息与事件</td><td><code>kubectl describe &lt;类型&gt; &lt;名&gt;</code></td><td>4</td></tr>
+  <tr><td>容器日志</td><td><code>kubectl logs &lt;pod&gt; [--container &lt;名&gt;]</code></td><td>4</td></tr>
+  <tr><td>进入容器</td><td><code>kubectl exec -it &lt;pod&gt; -- sh</code></td><td>4</td></tr>
+  <tr><td>查字段文档</td><td><code>kubectl explain pod.spec.restartPolicy</code></td><td>4</td></tr>
+  <tr><td>指定 / 默认 Namespace</td><td><code>-n &lt;ns&gt;</code> / <code>kubectl config set-context --current --namespace &lt;ns&gt;</code></td><td>5</td></tr>
+  <tr><td>扩缩容</td><td><code>kubectl scale deploy &lt;名&gt; --replicas N</code></td><td>6</td></tr>
+  <tr><td>发布状态 / 暂停 / 恢复</td><td><code>kubectl rollout status|pause|resume deploy &lt;名&gt;</code></td><td>6</td></tr>
+  <tr><td>发布历史 / 回滚</td><td><code>kubectl rollout history</code> / <code>rollout undo --to-revision=N</code></td><td>6</td></tr>
+  <tr><td>为 Deployment 创建 Service</td><td><code>kubectl expose deployment &lt;名&gt; --type=LoadBalancer</code></td><td>7</td></tr>
+  <tr><td>查看 EndpointSlice</td><td><code>kubectl get endpointslices</code></td><td>7</td></tr>
+  <tr><td>创建 ConfigMap / Secret</td><td><code>kubectl create cm|secret generic &lt;名&gt; --from-literal k=v</code></td><td>11</td></tr>
+  <tr><td>查看 API 资源和简称</td><td><code>kubectl api-resources</code></td><td>5、14</td></tr>
+  <tr><td>本地暴露 API</td><td><code>kubectl proxy --port 9000 &amp;</code></td><td>14</td></tr>
+  <tr><td>检查权限</td><td><code>kubectl auth can-i &lt;动词&gt; &lt;资源&gt; [--as 用户]</code></td><td>13</td></tr>
+  <tr><td>上一次崩溃的日志</td><td><code>kubectl logs &lt;pod&gt; --previous</code></td><td>17</td></tr>
+  <tr><td>按时间看事件</td><td><code>kubectl get events --sort-by=.lastTimestamp</code></td><td>17</td></tr>
+  <tr><td>临时调试容器</td><td><code>kubectl debug -it &lt;pod&gt; --image=busybox:1.36 --target=&lt;容器&gt;</code></td><td>17</td></tr>
+  <tr><td>绕过 Service 直连</td><td><code>kubectl port-forward deploy/&lt;名&gt; 8888:80</code></td><td>17</td></tr>
+  <tr><td>资源用量 / HPA 状态</td><td><code>kubectl top pods</code> / <code>kubectl get hpa --watch</code></td><td>18</td></tr>
+  <tr><td>给 Namespace 打 PSA 标签</td><td><code>kubectl label ns &lt;ns&gt; pod-security.kubernetes.io/enforce=baseline</code></td><td>15</td></tr>
+</table>
+</div>
+
+<h2 id="glossary">术语表</h2>
+
+<p>以下定义基于原书作者 Nigel Poulton 的术语表，按主题分组整理。</p>
+
+<h3>架构与核心概念</h3>
+<div class="tw">
+<table>
+  <tr><th>术语</th><th>含义</th></tr>
+  <tr><td>集群（Cluster）</td><td>一组协同运行用户应用的工作节点和控制平面节点。</td></tr>
+  <tr><td>控制平面（Control plane）</td><td>每个集群的大脑，包括 API、API 服务器、调度器、所有控制器等，运行在所有控制平面节点上。</td></tr>
+  <tr><td>控制平面节点</td><td>运行控制平面服务的节点，通常不运行用户应用。高可用应部署 3 或 5 个。</td></tr>
+  <tr><td>工作节点（Worker node / Node）</td><td>运行用户应用的节点，运行 kubelet、容器运行时和 kube-proxy。</td></tr>
+  <tr><td>数据平面（Data plane）</td><td>集群中承载用户应用的工作节点。</td></tr>
+  <tr><td>集群存储（Cluster store）</td><td>保存集群和应用状态的控制平面功能，通常基于 etcd，可单独部署成集群以获得更高性能和可用性。</td></tr>
+  <tr><td>etcd</td><td>大多数集群用作集群存储的开源分布式数据库。</td></tr>
+  <tr><td>kubelet</td><td>每个节点上的主代理：监视 API 服务器的新任务，并维持一条汇报通道。</td></tr>
+  <tr><td>kube-proxy</td><td>每个节点上运行，实现把 Service 流量路由到 Pod 的底层规则。</td></tr>
+  <tr><td>云控制器管理器</td><td>与底层云平台集成的控制平面服务，比如为 LoadBalancer Service 创建云负载均衡器。</td></tr>
+  <tr><td>控制器（Controller）</td><td>以调和循环运行的控制平面进程，持续让观测状态匹配期望状态。</td></tr>
+  <tr><td>调和循环（Reconciliation loop）</td><td>通过 API 服务器监视集群状态、确保观测状态匹配期望状态的控制器进程。</td></tr>
+  <tr><td>期望状态（Desired state）</td><td>集群和应用「应该」是什么样子，比如某微服务要 5 个监听 8080 的副本。</td></tr>
+  <tr><td>观测状态（Observed state）</td><td>也叫当前状态、实际状态：集群和应用最新的真实情况。</td></tr>
+  <tr><td>编排器（Orchestrator）</td><td>部署和管理应用的软件。Kubernetes 是基于容器的微服务应用的事实标准编排器。</td></tr>
+  <tr><td>云原生（Cloud native）</td><td>一种设计、构建和运行现代应用与基础设施的方式。作者认为能自愈、按需扩缩、滚动更新（可能还能回滚）的应用就是云原生的。</td></tr>
+  <tr><td>微服务（Microservices）</td><td>把应用功能拆成各自独立的小应用（容器），通过 API 通信，协同组成完整应用的设计模式。</td></tr>
+  <tr><td>K8s</td><td>Kubernetes 的简写，8 代替 K 和 s 之间的 8 个字母，读作 “Kates”。</td></tr>
+</table>
+</div>
+
+<h3>容器与运行时</h3>
+<div class="tw">
+<table>
+  <tr><th>术语</th><th>含义</th></tr>
+  <tr><td>容器（Container）</td><td>运行现代应用的轻量环境。每个容器是一个虚拟的操作系统，有自己的进程树、文件系统、共享内存等。一个容器运行一个应用进程。</td></tr>
+  <tr><td>容器运行时</td><td>每个节点上负责拉镜像、启停容器等底层操作的软件，通常是 containerd 或 CRI-O。Docker 在 1.20 被弃用、1.24 移除支持。</td></tr>
+  <tr><td>containerd</td><td>大多数集群使用的业界标准容器运行时，由 Docker 公司捐给 CNCF，读作 “container dee”。</td></tr>
+  <tr><td>CRI-O</td><td>容器运行时，常见于基于 OpenShift 的集群。</td></tr>
+  <tr><td>CRI</td><td>容器运行时接口，让运行时可插拔，按需选择最合适的运行时。</td></tr>
+  <tr><td>CNI</td><td>容器网络接口，可插拔，第三方插件实现覆盖网络、BGP 网络等。</td></tr>
+  <tr><td>CSI</td><td>容器存储接口，让第三方存储系统接入 Kubernetes；厂商的 CSI 插件以 Pod 形式运行在集群上。</td></tr>
+  <tr><td>服务网格（Service mesh）</td><td>提供 Pod 间流量加密、增强的网络遥测和高级路由的基础设施软件，如 Consul、Istio、Linkerd。</td></tr>
+</table>
+</div>
+
+<h3>工作负载</h3>
+<div class="tw">
+<table>
+  <tr><th>术语</th><th>含义</th></tr>
+  <tr><td>Pod</td><td>Kubernetes 上最小的调度单位。所有容器都必须运行在 Pod 里。Pod 提供共享的执行环境：IP 地址、卷、共享内存等。</td></tr>
+  <tr><td>init 容器</td><td>在主应用容器启动前运行并完成的特殊容器，常用于检查或初始化环境。</td></tr>
+  <tr><td>Sidecar</td><td>与主应用容器一起运行、为其增强功能的特殊容器。服务网格常以 sidecar 注入 Pod。</td></tr>
+  <tr><td>Deployment</td><td>部署和管理一组无状态 Pod 的控制器，支持发布、回滚和自愈，借助 ReplicaSet 实现扩缩和自愈。</td></tr>
+  <tr><td>ReplicaSet</td><td>以控制器形式运行，执行自愈和扩缩，被 Deployment 使用。</td></tr>
+  <tr><td>StatefulSet</td><td>部署和管理有状态 Pod 的控制器，类似 Deployment，但面向有状态应用。</td></tr>
+  <tr><td>清单文件（Manifest file）</td><td>保存一个或多个 Kubernetes 对象配置的 YAML 文件，提交给 API 服务器后即部署到集群。</td></tr>
+  <tr><td>标签（Label）</td><td>用于分组的对象元数据，与标签选择器配合把 Pod 和更高层的控制器、Service 关联起来。</td></tr>
+  <tr><td>标签选择器（Label selector）</td><td>用来确定要对哪些 Pod 执行操作。比如滚动更新时，只有匹配 Deployment 选择器的 Pod 会被替换。</td></tr>
+  <tr><td>注解（Annotation）</td><td>可用于暴露 alpha/beta 功能或与第三方系统集成的对象元数据。</td></tr>
+  <tr><td>Namespace</td><td>把一个集群划分成多个虚拟集群的方式，适合施加不同的配额和访问控制策略，不适合强隔离。</td></tr>
+</table>
+</div>
+
+<h3>网络</h3>
+<div class="tw">
+<table>
+  <tr><th>术语</th><th>含义</th></tr>
+  <tr><td>Service</td><td>首字母大写。为 Pod 中的应用提供网络访问。放在一组 Pod 前面后，Pod 失败、扩缩、被替换都不会改变访问入口；可与云平台集成创建互联网负载均衡器。</td></tr>
+  <tr><td>Endpoints / EndpointSlice</td><td>匹配 Service 标签选择器的健康 Pod 的最新列表，即 Service 会把流量发给谁。EndpointSlice 在大集群上性能更好。</td></tr>
+  <tr><td>Gateway API</td><td>把外部流量路由到 Kubernetes 应用的原生框架，需要 Envoy、NGINX 等第三方实现。</td></tr>
+  <tr><td>Gateway</td><td>用于部署和管理外部负载均衡器的 Gateway API 资源。</td></tr>
+  <tr><td>Listener</td><td>Gateway 的属性。Gateway 代表负载均衡器，listener 代表它的接口，比如监听 8080 的 HTTP 流量。</td></tr>
+  <tr><td>GatewayClass</td><td>把 Gateway 映射到某个 Gateway API 控制器。</td></tr>
+  <tr><td>Gateway 控制器</td><td>监视并调和 Gateway 的控制平面进程。没有默认实现，需要安装第三方的。</td></tr>
+  <tr><td>HTTPRoute</td><td>给 Gateway listener 编程高级路由的资源，比如把 <code>example.com/kits</code> 的 90% 请求发给 Service A、10% 发给 Service B。</td></tr>
+  <tr><td>Ingress</td><td>已弃用，被 Gateway API 取代。</td></tr>
+</table>
+</div>
+
+<h3>存储与配置</h3>
+<div class="tw">
+<table>
+  <tr><th>术语</th><th>含义</th></tr>
+  <tr><td>卷（Volume）</td><td>持久存储的泛称。</td></tr>
+  <tr><td>PersistentVolume（PV）</td><td>在集群上映射存储卷的对象。外部存储必须先映射成 PV 才能被应用使用。</td></tr>
+  <tr><td>PersistentVolumeClaim（PVC）</td><td>像一张允许应用使用 PV 的票据。没有有效的 PVC，应用就用不了 PV。与 StorageClass 配合实现动态创建卷。</td></tr>
+  <tr><td>StorageClass（SC）</td><td>在集群上创建不同存储档位的方式，比如 <code>fast</code> 创建 NVMe 存储，<code>medium-three-site</code> 创建跨三个站点复制的慢速存储。</td></tr>
+  <tr><td>ConfigMap</td><td>保存非敏感配置数据的对象，可在运行时给通用容器加入自定义配置而无需改镜像。</td></tr>
+  <tr><td>Secret</td><td>用于敏感配置数据的「ConfigMap」，把敏感数据保存在镜像之外，运行时注入容器。</td></tr>
+</table>
+</div>
+
+<h3>API 与安全</h3>
+<div class="tw">
+<table>
+  <tr><th>术语</th><th>含义</th></tr>
+  <tr><td>API</td><td>应用程序编程接口。Kubernetes 的所有资源都定义在 RESTful 的 API 中，通过 API 服务器暴露。</td></tr>
+  <tr><td>API 服务器</td><td>在安全端口上通过 HTTPS 暴露 API，运行在控制平面上。</td></tr>
+  <tr><td>API 组</td><td>一组相关的 API 资源，比如网络资源通常在 <code>networking.k8s.io</code> 组里。</td></tr>
+  <tr><td>API 资源</td><td>Pod、Deployment、Service 等所有 Kubernetes 对象都以资源的形式定义在 API 中。</td></tr>
+  <tr><td>CRD</td><td>自定义资源定义，用于向 Kubernetes API 添加你自己的资源。</td></tr>
+  <tr><td>REST</td><td>表述性状态转移，最常见的 Web API 架构，用 GET、POST、PUT、PATCH、DELETE 等 HTTP 方法操作对象。</td></tr>
+  <tr><td>CRUD</td><td>创建、读取、更新、删除四种基本操作。</td></tr>
+  <tr><td>JSON</td><td>JavaScript 对象表示法，Kubernetes 首选的数据发送和存储格式。</td></tr>
+  <tr><td>YAML</td><td>通常用来编写 Kubernetes 配置文件的语言，是 JSON 的超集。</td></tr>
+  <tr><td>kubectl</td><td>Kubernetes 命令行工具，通过 API 服务器发送命令和查询状态。</td></tr>
+  <tr><td>RBAC</td><td>基于角色的访问控制，判断已认证用户能否对集群资源执行操作的授权模块。</td></tr>
+  <tr><td>准入控制器（Admission controller）</td><td>验证或修改资源以执行策略的代码，在认证和授权之后作为 API 准入链的一部分运行。</td></tr>
+</table>
+</div>
+
+<h2 id="next">下一步</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="继续学习 Kubernetes 的路线">
+  <rect class="bx-g" x="20" y="60" width="160" height="100" rx="12"/>
+  <text class="ttl on-g" x="100" y="88" text-anchor="middle">✓ 你在这里</text>
+  <text class="sm" x="100" y="112" text-anchor="middle">核心对象、网络、</text>
+  <text class="sm" x="100" y="130" text-anchor="middle">存储、配置、安全</text>
+
+  <rect class="bx-b" x="220" y="20" width="160" height="80" rx="12"/>
+  <text class="ttl on-b" x="300" y="46" text-anchor="middle">打牢容器基础</text>
+  <text class="sm" x="300" y="68" text-anchor="middle">Dockerfile、镜像、</text>
+  <text class="sm" x="300" y="86" text-anchor="middle">多容器应用</text>
+  <rect class="bx-b" x="220" y="120" width="160" height="80" rx="12"/>
+  <text class="ttl on-b" x="300" y="146" text-anchor="middle">继续补齐的对象</text>
+  <text class="sm" x="300" y="168" text-anchor="middle">Job、CronJob、</text>
+  <text class="sm" x="300" y="186" text-anchor="middle">DaemonSet、NetworkPolicy</text>
+
+  <rect class="bx-p" x="420" y="20" width="160" height="80" rx="12"/>
+  <text class="ttl on-p" x="500" y="46" text-anchor="middle">工程化交付</text>
+  <text class="sm" x="500" y="68" text-anchor="middle">Helm、Kustomize、</text>
+  <text class="sm" x="500" y="86" text-anchor="middle">GitOps（Argo CD/Flux）</text>
+  <rect class="bx-p" x="420" y="120" width="160" height="80" rx="12"/>
+  <text class="ttl on-p" x="500" y="146" text-anchor="middle">可观测性</text>
+  <text class="sm" x="500" y="168" text-anchor="middle">Prometheus、Grafana、</text>
+  <text class="sm" x="500" y="186" text-anchor="middle">日志与链路追踪</text>
+
+  <rect class="bx-a" x="620" y="60" width="120" height="100" rx="12"/>
+  <text class="ttl on-a" x="680" y="88" text-anchor="middle">融入社区</text>
+  <text class="sm" x="680" y="112" text-anchor="middle">线上群组、</text>
+  <text class="sm" x="680" y="130" text-anchor="middle">本地 Meetup</text>
+
+  <path class="ln" d="M182 100 L216 62" marker-end="url(#ar)"/>
+  <path class="ln" d="M182 120 L216 158" marker-end="url(#ar)"/>
+  <path class="ln" d="M382 60 H416" marker-end="url(#ar)"/>
+  <path class="ln" d="M382 160 H416" marker-end="url(#ar)"/>
+  <path class="ln" d="M582 60 L616 96" marker-end="url(#ar)"/>
+  <path class="ln" d="M582 160 L616 124" marker-end="url(#ar)"/>
+</svg>
+<figcaption>图 A-2　一条建议的进阶路线（中间两列是本教程补充的建议，并非原书内容）</figcaption>
+</figure>
+
+<ul>
+  <li><strong>容器与 AI</strong>：原书作者的 <em>Getting Started with Docker</em>（约 100 页，含一个多容器 AI 应用，一天就能上手）和 <em>Docker Deep Dive</em> 适合继续深入容器。</li>
+  <li><strong>参与社区</strong>：云原生社区里有很多乐于助人的人。加入线上的 Kubernetes 群组和讨论，找找本地的 Kubernetes / 云原生 Meetup。</li>
+  <li><strong>反复动手</strong>：把每章的「动手练习」都做一遍；隔一天再重读一章——新概念需要时间沉淀，这很正常。</li>
+  <li><strong>关注版本更新</strong>：Kubernetes 每年约发布 3 个版本，原书也每年更新。示例仓库地址：<code>github.com/nigelpoulton/TKB</code>（2026 分支）。</li>
+</ul>
+
+<div class="box tip">
+  <div class="t">&#128161; 最后一句话</div>
+  <p>
+    如果只记住一件事，请记住：<strong>你用 YAML 声明期望状态，Kubernetes 的控制器永不停歇地把现实调和成你想要的样子。</strong>
+    全书的每一章，都是这句话在不同对象上的展开。
+  </p>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

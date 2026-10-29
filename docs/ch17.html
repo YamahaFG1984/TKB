@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>附录 · 术语表与下一步 — Kubernetes 入门实战</title>
+<title>第 17 章 · 排错实战 — Kubernetes 入门实战</title>
 <link rel="stylesheet" href="assets/style.css">
 </head>
 <body data-chapter="17">
@@ -11,274 +11,838 @@
 <aside id="sidebar"></aside>
 <main>
 
-<span class="chapter-eyebrow">附录</span>
-<h1>术语表、速查与下一步</h1>
+<span class="chapter-eyebrow">第 17 章 · 补充篇</span>
+<h1>排错实战</h1>
 <p class="lede">
-  恭喜你读完了全部 16 章！这一页把散落在各章的知识收拢起来：一张全书概念地图、一份 kubectl 速查表、一份术语表，以及继续学习的路线。
-  建议收藏，遇到想不起来的词就回来翻一翻。
+  学会部署只是第一步，真正的日常是「为什么它没跑起来」。这一章把初学者最常遇到的故障——
+  <code>Pending</code>、<code>ImagePullBackOff</code>、<code>CrashLoopBackOff</code>、<code>OOMKilled</code>、Service 不通、PVC 卡住、发布卡住——
+  逐个<strong>故意制造出来</strong>，再一步步查出原因、修好它。
 </p>
+
+<div class="box note">
+  <div class="t">&#9432; 关于补充篇</div>
+  <p>
+    第 17、18 章不是原书内容，是本教程为初学者补充的实战章节，用到的概念都在前 16 章讲过。
+    配套的故障示例在仓库的 <code>extras/troubleshooting/</code> 目录，每个文件都是<strong>故意写错</strong>的。
+    下文中的命令输出是按 Kubernetes 的标准格式整理的示例，你的集群里名字、IP、时间会不同，个别措辞也可能随版本略有差异。
+  </p>
+</div>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>掌握排错「三板斧」：<code>get</code> → <code>describe</code>（看 Events）→ <code>logs</code></li>
+    <li>看到 Pod 状态就能判断问题出在生命周期的哪一步</li>
+    <li>独立排查 7 类最常见的故障，并知道怎么修</li>
+    <li>按固定顺序排查「Service 访问不通」</li>
+    <li>会用 <code>logs --previous</code>、<code>kubectl debug</code>、临时 Pod、<code>port-forward</code> 等工具</li>
+  </ul>
+</div>
 
 <div id="chapter-toc"></div>
 
-<h2 id="map">一张图串起全书</h2>
+<h2 id="mindset">排错心法</h2>
+
+<p>
+  Kubernetes 的故障看起来五花八门，但排查思路几乎总是一样的：<strong>先看状态，再看事件，最后看日志</strong>。
+  状态告诉你「卡在哪一步」，事件告诉你「Kubernetes 认为出了什么事」，日志告诉你「应用自己说了什么」。
+</p>
 
 <figure>
-<svg class="dgm" viewBox="0 0 760 470" role="img" aria-label="Kubernetes 主要对象之间的关系总览">
-  <!-- 外部流量 -->
-  <rect class="bx" x="20" y="20" width="110" height="46" rx="10"/>
-  <text class="lbl" x="75" y="48" text-anchor="middle">用户 / 浏览器</text>
-  <rect class="bx-a" x="170" y="14" width="180" height="58" rx="10"/>
-  <text class="ttl on-a" x="260" y="38" text-anchor="middle">Gateway + HTTPRoute</text>
-  <text class="sm" x="260" y="58" text-anchor="middle">第 8 章 · 外部流量入口</text>
-  <path class="ln" d="M132 43 H166" marker-end="url(#ar)"/>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="排错三板斧：get、describe、logs">
+  <rect class="bx-b" x="20" y="30" width="220" height="140" rx="14"/>
+  <text class="ttl on-b" x="130" y="58" text-anchor="middle">① kubectl get</text>
+  <text class="sm" x="130" y="84" text-anchor="middle">看 STATUS、READY、</text>
+  <text class="sm" x="130" y="102" text-anchor="middle">RESTARTS 三列</text>
+  <text class="sm on-b" x="130" y="134" text-anchor="middle">回答：卡在哪一步？</text>
+  <text class="mono sm" x="130" y="156" text-anchor="middle">-o wide 看节点和 IP</text>
 
-  <!-- kubectl / API -->
-  <rect class="bx" x="420" y="20" width="110" height="46" rx="10"/>
-  <text class="lbl" x="475" y="48" text-anchor="middle">kubectl</text>
-  <rect class="bx-b" x="570" y="14" width="170" height="58" rx="10"/>
-  <text class="ttl on-b" x="655" y="38" text-anchor="middle">API 服务器</text>
-  <text class="sm" x="655" y="58" text-anchor="middle">第 13、14 章 · RBAC · CRD</text>
-  <path class="ln" d="M532 43 H566" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="270" y="30" width="220" height="140" rx="14"/>
+  <text class="ttl on-a" x="380" y="58" text-anchor="middle">② kubectl describe</text>
+  <text class="sm" x="380" y="84" text-anchor="middle">拉到最底部看 Events，</text>
+  <text class="sm" x="380" y="102" text-anchor="middle">再看 State / Last State</text>
+  <text class="sm on-a" x="380" y="134" text-anchor="middle">回答：K8s 看到了什么？</text>
+  <text class="mono sm" x="380" y="156" text-anchor="middle">90% 的答案在这里</text>
 
-  <!-- 集群 + Namespace -->
-  <rect class="bx-d" x="20" y="96" width="720" height="360" rx="16"/>
-  <text class="sm" x="36" y="116">集群（第 2、3 章）——控制平面 + 工作节点</text>
-  <rect class="bx" x="40" y="126" width="680" height="316" rx="14"/>
-  <text class="ttl" x="56" y="148">Namespace（第 5 章）</text>
+  <rect class="bx-g" x="520" y="30" width="220" height="140" rx="14"/>
+  <text class="ttl on-g" x="630" y="58" text-anchor="middle">③ kubectl logs</text>
+  <text class="sm" x="630" y="84" text-anchor="middle">容器跑起来过才有日志；</text>
+  <text class="sm" x="630" y="102" text-anchor="middle">崩溃了就加 --previous</text>
+  <text class="sm on-g" x="630" y="134" text-anchor="middle">回答：应用自己说了什么？</text>
+  <text class="mono sm" x="630" y="156" text-anchor="middle">-f 持续跟踪</text>
 
-  <rect class="bx-a" x="70" y="164" width="200" height="56" rx="10"/>
-  <text class="ttl on-a" x="170" y="188" text-anchor="middle">Service</text>
-  <text class="sm" x="170" y="208" text-anchor="middle">第 7、9 章 · 稳定入口 + DNS</text>
-  <path class="ln-a" d="M300 74 L250 160" marker-end="url(#ar-a)"/>
-
-  <rect class="bx-p" x="320" y="164" width="180" height="56" rx="10"/>
-  <text class="ttl on-p" x="410" y="188" text-anchor="middle">Deployment</text>
-  <text class="sm" x="410" y="208" text-anchor="middle">第 6 章 · 无状态</text>
-  <rect class="bx-p" x="520" y="164" width="180" height="56" rx="10"/>
-  <text class="ttl on-p" x="610" y="188" text-anchor="middle">StatefulSet</text>
-  <text class="sm" x="610" y="208" text-anchor="middle">第 12 章 · 有状态</text>
-
-  <rect class="bx-b" x="70" y="260" width="630" height="90" rx="12"/>
-  <text class="ttl on-b" x="86" y="284">Pod（第 4 章）</text>
-  <rect class="bx-g" x="200" y="272" width="150" height="66" rx="8"/>
-  <text class="ttl on-g" x="275" y="298" text-anchor="middle">容器</text>
-  <text class="sm" x="275" y="318" text-anchor="middle">第 1 章 · 应用</text>
-  <rect class="bx" x="370" y="272" width="150" height="66" rx="8"/>
-  <text class="ttl" x="445" y="298" text-anchor="middle">init / sidecar</text>
-  <text class="sm" x="445" y="318" text-anchor="middle">多容器模式</text>
-  <rect class="bx-r" x="540" y="272" width="150" height="66" rx="8"/>
-  <text class="ttl on-r" x="615" y="298" text-anchor="middle">securityContext</text>
-  <text class="sm" x="615" y="318" text-anchor="middle">第 15、16 章</text>
-
-  <path class="ln" d="M170 222 L170 256" marker-end="url(#ar)"/>
-  <text class="sm" x="178" y="244">标签选择器</text>
-  <path class="ln-p" d="M410 222 V256" marker-end="url(#ar)"/>
-  <path class="ln-p" d="M610 222 V256" marker-end="url(#ar)"/>
-
-  <rect class="bx-g" x="70" y="372" width="300" height="56" rx="10"/>
-  <text class="ttl on-g" x="220" y="396" text-anchor="middle">ConfigMap · Secret</text>
-  <text class="sm" x="220" y="416" text-anchor="middle">第 11 章 · 环境变量 / 卷注入</text>
-  <rect class="bx-g" x="400" y="372" width="300" height="56" rx="10"/>
-  <text class="ttl on-g" x="550" y="396" text-anchor="middle">PVC → PV ← StorageClass</text>
-  <text class="sm" x="550" y="416" text-anchor="middle">第 10 章 · 持久存储（CSI）</text>
-  <path class="ln" d="M220 352 V368" marker-start="url(#ar)"/>
-  <path class="ln" d="M550 352 V368" marker-start="url(#ar)"/>
+  <path class="ln" d="M242 100 H266" marker-end="url(#ar)"/>
+  <path class="ln" d="M492 100 H516" marker-end="url(#ar)"/>
+  <text class="sm" x="380" y="208" text-anchor="middle">从外到内：先确认 Kubernetes 层面没问题，再怀疑应用本身</text>
 </svg>
-<figcaption>图 A-1　全书主要对象之间的关系</figcaption>
+<figcaption>图 17-1　排错三板斧</figcaption>
 </figure>
 
-<h2 id="cheatsheet">kubectl 速查</h2>
-
-<div class="tw">
-<table>
-  <tr><th>想做什么</th><th>命令</th><th>章节</th></tr>
-  <tr><td>查看节点</td><td><code>kubectl get nodes</code></td><td>3</td></tr>
-  <tr><td>查看 / 切换 context</td><td><code>kubectl config get-contexts</code> / <code>use-context &lt;名&gt;</code></td><td>3</td></tr>
-  <tr><td>声明式部署</td><td><code>kubectl apply -f &lt;文件&gt;</code></td><td>4</td></tr>
-  <tr><td>查看对象</td><td><code>kubectl get &lt;类型&gt; [-o wide|yaml]</code></td><td>4</td></tr>
-  <tr><td>详细信息与事件</td><td><code>kubectl describe &lt;类型&gt; &lt;名&gt;</code></td><td>4</td></tr>
-  <tr><td>容器日志</td><td><code>kubectl logs &lt;pod&gt; [--container &lt;名&gt;]</code></td><td>4</td></tr>
-  <tr><td>进入容器</td><td><code>kubectl exec -it &lt;pod&gt; -- sh</code></td><td>4</td></tr>
-  <tr><td>查字段文档</td><td><code>kubectl explain pod.spec.restartPolicy</code></td><td>4</td></tr>
-  <tr><td>指定 / 默认 Namespace</td><td><code>-n &lt;ns&gt;</code> / <code>kubectl config set-context --current --namespace &lt;ns&gt;</code></td><td>5</td></tr>
-  <tr><td>扩缩容</td><td><code>kubectl scale deploy &lt;名&gt; --replicas N</code></td><td>6</td></tr>
-  <tr><td>发布状态 / 暂停 / 恢复</td><td><code>kubectl rollout status|pause|resume deploy &lt;名&gt;</code></td><td>6</td></tr>
-  <tr><td>发布历史 / 回滚</td><td><code>kubectl rollout history</code> / <code>rollout undo --to-revision=N</code></td><td>6</td></tr>
-  <tr><td>为 Deployment 创建 Service</td><td><code>kubectl expose deployment &lt;名&gt; --type=LoadBalancer</code></td><td>7</td></tr>
-  <tr><td>查看 EndpointSlice</td><td><code>kubectl get endpointslices</code></td><td>7</td></tr>
-  <tr><td>创建 ConfigMap / Secret</td><td><code>kubectl create cm|secret generic &lt;名&gt; --from-literal k=v</code></td><td>11</td></tr>
-  <tr><td>查看 API 资源和简称</td><td><code>kubectl api-resources</code></td><td>5、14</td></tr>
-  <tr><td>本地暴露 API</td><td><code>kubectl proxy --port 9000 &amp;</code></td><td>14</td></tr>
-  <tr><td>检查权限</td><td><code>kubectl auth can-i &lt;动词&gt; &lt;资源&gt; [--as 用户]</code></td><td>13</td></tr>
-  <tr><td>给 Namespace 打 PSA 标签</td><td><code>kubectl label ns &lt;ns&gt; pod-security.kubernetes.io/enforce=baseline</code></td><td>15</td></tr>
-</table>
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl get pods -o wide                       # 状态总览
+$ kubectl describe pod &lt;pod&gt;                     # 详情 + Events（看最底部）
+$ kubectl logs &lt;pod&gt; [-c 容器名]                 # 当前容器的日志
+$ kubectl logs &lt;pod&gt; --previous                  # 上一次（已崩溃）容器的日志
+$ kubectl get events --sort-by=.lastTimestamp    # 整个 Namespace 的事件，按时间排序
+$ kubectl events --for pod/&lt;pod&gt;                 # 较新的 kubectl：只看某个对象的事件
+</pre>
 </div>
 
-<h2 id="glossary">术语表</h2>
-
-<p>以下定义基于原书作者 Nigel Poulton 的术语表，按主题分组整理。</p>
-
-<h3>架构与核心概念</h3>
-<div class="tw">
-<table>
-  <tr><th>术语</th><th>含义</th></tr>
-  <tr><td>集群（Cluster）</td><td>一组协同运行用户应用的工作节点和控制平面节点。</td></tr>
-  <tr><td>控制平面（Control plane）</td><td>每个集群的大脑，包括 API、API 服务器、调度器、所有控制器等，运行在所有控制平面节点上。</td></tr>
-  <tr><td>控制平面节点</td><td>运行控制平面服务的节点，通常不运行用户应用。高可用应部署 3 或 5 个。</td></tr>
-  <tr><td>工作节点（Worker node / Node）</td><td>运行用户应用的节点，运行 kubelet、容器运行时和 kube-proxy。</td></tr>
-  <tr><td>数据平面（Data plane）</td><td>集群中承载用户应用的工作节点。</td></tr>
-  <tr><td>集群存储（Cluster store）</td><td>保存集群和应用状态的控制平面功能，通常基于 etcd，可单独部署成集群以获得更高性能和可用性。</td></tr>
-  <tr><td>etcd</td><td>大多数集群用作集群存储的开源分布式数据库。</td></tr>
-  <tr><td>kubelet</td><td>每个节点上的主代理：监视 API 服务器的新任务，并维持一条汇报通道。</td></tr>
-  <tr><td>kube-proxy</td><td>每个节点上运行，实现把 Service 流量路由到 Pod 的底层规则。</td></tr>
-  <tr><td>云控制器管理器</td><td>与底层云平台集成的控制平面服务，比如为 LoadBalancer Service 创建云负载均衡器。</td></tr>
-  <tr><td>控制器（Controller）</td><td>以调和循环运行的控制平面进程，持续让观测状态匹配期望状态。</td></tr>
-  <tr><td>调和循环（Reconciliation loop）</td><td>通过 API 服务器监视集群状态、确保观测状态匹配期望状态的控制器进程。</td></tr>
-  <tr><td>期望状态（Desired state）</td><td>集群和应用「应该」是什么样子，比如某微服务要 5 个监听 8080 的副本。</td></tr>
-  <tr><td>观测状态（Observed state）</td><td>也叫当前状态、实际状态：集群和应用最新的真实情况。</td></tr>
-  <tr><td>编排器（Orchestrator）</td><td>部署和管理应用的软件。Kubernetes 是基于容器的微服务应用的事实标准编排器。</td></tr>
-  <tr><td>云原生（Cloud native）</td><td>一种设计、构建和运行现代应用与基础设施的方式。作者认为能自愈、按需扩缩、滚动更新（可能还能回滚）的应用就是云原生的。</td></tr>
-  <tr><td>微服务（Microservices）</td><td>把应用功能拆成各自独立的小应用（容器），通过 API 通信，协同组成完整应用的设计模式。</td></tr>
-  <tr><td>K8s</td><td>Kubernetes 的简写，8 代替 K 和 s 之间的 8 个字母，读作 “Kates”。</td></tr>
-</table>
+<div class="box warn">
+  <div class="t">&#9888; Events 只保留大约一小时</div>
+  <p>事件默认只保存一段时间（通常 1 小时）。出了问题要尽早 <code>describe</code>；需要长期留存的话，得把事件导出到日志系统。</p>
 </div>
 
-<h3>容器与运行时</h3>
-<div class="tw">
-<table>
-  <tr><th>术语</th><th>含义</th></tr>
-  <tr><td>容器（Container）</td><td>运行现代应用的轻量环境。每个容器是一个虚拟的操作系统，有自己的进程树、文件系统、共享内存等。一个容器运行一个应用进程。</td></tr>
-  <tr><td>容器运行时</td><td>每个节点上负责拉镜像、启停容器等底层操作的软件，通常是 containerd 或 CRI-O。Docker 在 1.20 被弃用、1.24 移除支持。</td></tr>
-  <tr><td>containerd</td><td>大多数集群使用的业界标准容器运行时，由 Docker 公司捐给 CNCF，读作 “container dee”。</td></tr>
-  <tr><td>CRI-O</td><td>容器运行时，常见于基于 OpenShift 的集群。</td></tr>
-  <tr><td>CRI</td><td>容器运行时接口，让运行时可插拔，按需选择最合适的运行时。</td></tr>
-  <tr><td>CNI</td><td>容器网络接口，可插拔，第三方插件实现覆盖网络、BGP 网络等。</td></tr>
-  <tr><td>CSI</td><td>容器存储接口，让第三方存储系统接入 Kubernetes；厂商的 CSI 插件以 Pod 形式运行在集群上。</td></tr>
-  <tr><td>服务网格（Service mesh）</td><td>提供 Pod 间流量加密、增强的网络遥测和高级路由的基础设施软件，如 Consul、Istio、Linkerd。</td></tr>
-</table>
-</div>
+<h2 id="lifecycle">从状态判断问题出在哪一步</h2>
 
-<h3>工作负载</h3>
-<div class="tw">
-<table>
-  <tr><th>术语</th><th>含义</th></tr>
-  <tr><td>Pod</td><td>Kubernetes 上最小的调度单位。所有容器都必须运行在 Pod 里。Pod 提供共享的执行环境：IP 地址、卷、共享内存等。</td></tr>
-  <tr><td>init 容器</td><td>在主应用容器启动前运行并完成的特殊容器，常用于检查或初始化环境。</td></tr>
-  <tr><td>Sidecar</td><td>与主应用容器一起运行、为其增强功能的特殊容器。服务网格常以 sidecar 注入 Pod。</td></tr>
-  <tr><td>Deployment</td><td>部署和管理一组无状态 Pod 的控制器，支持发布、回滚和自愈，借助 ReplicaSet 实现扩缩和自愈。</td></tr>
-  <tr><td>ReplicaSet</td><td>以控制器形式运行，执行自愈和扩缩，被 Deployment 使用。</td></tr>
-  <tr><td>StatefulSet</td><td>部署和管理有状态 Pod 的控制器，类似 Deployment，但面向有状态应用。</td></tr>
-  <tr><td>清单文件（Manifest file）</td><td>保存一个或多个 Kubernetes 对象配置的 YAML 文件，提交给 API 服务器后即部署到集群。</td></tr>
-  <tr><td>标签（Label）</td><td>用于分组的对象元数据，与标签选择器配合把 Pod 和更高层的控制器、Service 关联起来。</td></tr>
-  <tr><td>标签选择器（Label selector）</td><td>用来确定要对哪些 Pod 执行操作。比如滚动更新时，只有匹配 Deployment 选择器的 Pod 会被替换。</td></tr>
-  <tr><td>注解（Annotation）</td><td>可用于暴露 alpha/beta 功能或与第三方系统集成的对象元数据。</td></tr>
-  <tr><td>Namespace</td><td>把一个集群划分成多个虚拟集群的方式，适合施加不同的配额和访问控制策略，不适合强隔离。</td></tr>
-</table>
-</div>
-
-<h3>网络</h3>
-<div class="tw">
-<table>
-  <tr><th>术语</th><th>含义</th></tr>
-  <tr><td>Service</td><td>首字母大写。为 Pod 中的应用提供网络访问。放在一组 Pod 前面后，Pod 失败、扩缩、被替换都不会改变访问入口；可与云平台集成创建互联网负载均衡器。</td></tr>
-  <tr><td>Endpoints / EndpointSlice</td><td>匹配 Service 标签选择器的健康 Pod 的最新列表，即 Service 会把流量发给谁。EndpointSlice 在大集群上性能更好。</td></tr>
-  <tr><td>Gateway API</td><td>把外部流量路由到 Kubernetes 应用的原生框架，需要 Envoy、NGINX 等第三方实现。</td></tr>
-  <tr><td>Gateway</td><td>用于部署和管理外部负载均衡器的 Gateway API 资源。</td></tr>
-  <tr><td>Listener</td><td>Gateway 的属性。Gateway 代表负载均衡器，listener 代表它的接口，比如监听 8080 的 HTTP 流量。</td></tr>
-  <tr><td>GatewayClass</td><td>把 Gateway 映射到某个 Gateway API 控制器。</td></tr>
-  <tr><td>Gateway 控制器</td><td>监视并调和 Gateway 的控制平面进程。没有默认实现，需要安装第三方的。</td></tr>
-  <tr><td>HTTPRoute</td><td>给 Gateway listener 编程高级路由的资源，比如把 <code>example.com/kits</code> 的 90% 请求发给 Service A、10% 发给 Service B。</td></tr>
-  <tr><td>Ingress</td><td>已弃用，被 Gateway API 取代。</td></tr>
-</table>
-</div>
-
-<h3>存储与配置</h3>
-<div class="tw">
-<table>
-  <tr><th>术语</th><th>含义</th></tr>
-  <tr><td>卷（Volume）</td><td>持久存储的泛称。</td></tr>
-  <tr><td>PersistentVolume（PV）</td><td>在集群上映射存储卷的对象。外部存储必须先映射成 PV 才能被应用使用。</td></tr>
-  <tr><td>PersistentVolumeClaim（PVC）</td><td>像一张允许应用使用 PV 的票据。没有有效的 PVC，应用就用不了 PV。与 StorageClass 配合实现动态创建卷。</td></tr>
-  <tr><td>StorageClass（SC）</td><td>在集群上创建不同存储档位的方式，比如 <code>fast</code> 创建 NVMe 存储，<code>medium-three-site</code> 创建跨三个站点复制的慢速存储。</td></tr>
-  <tr><td>ConfigMap</td><td>保存非敏感配置数据的对象，可在运行时给通用容器加入自定义配置而无需改镜像。</td></tr>
-  <tr><td>Secret</td><td>用于敏感配置数据的「ConfigMap」，把敏感数据保存在镜像之外，运行时注入容器。</td></tr>
-</table>
-</div>
-
-<h3>API 与安全</h3>
-<div class="tw">
-<table>
-  <tr><th>术语</th><th>含义</th></tr>
-  <tr><td>API</td><td>应用程序编程接口。Kubernetes 的所有资源都定义在 RESTful 的 API 中，通过 API 服务器暴露。</td></tr>
-  <tr><td>API 服务器</td><td>在安全端口上通过 HTTPS 暴露 API，运行在控制平面上。</td></tr>
-  <tr><td>API 组</td><td>一组相关的 API 资源，比如网络资源通常在 <code>networking.k8s.io</code> 组里。</td></tr>
-  <tr><td>API 资源</td><td>Pod、Deployment、Service 等所有 Kubernetes 对象都以资源的形式定义在 API 中。</td></tr>
-  <tr><td>CRD</td><td>自定义资源定义，用于向 Kubernetes API 添加你自己的资源。</td></tr>
-  <tr><td>REST</td><td>表述性状态转移，最常见的 Web API 架构，用 GET、POST、PUT、PATCH、DELETE 等 HTTP 方法操作对象。</td></tr>
-  <tr><td>CRUD</td><td>创建、读取、更新、删除四种基本操作。</td></tr>
-  <tr><td>JSON</td><td>JavaScript 对象表示法，Kubernetes 首选的数据发送和存储格式。</td></tr>
-  <tr><td>YAML</td><td>通常用来编写 Kubernetes 配置文件的语言，是 JSON 的超集。</td></tr>
-  <tr><td>kubectl</td><td>Kubernetes 命令行工具，通过 API 服务器发送命令和查询状态。</td></tr>
-  <tr><td>RBAC</td><td>基于角色的访问控制，判断已认证用户能否对集群资源执行操作的授权模块。</td></tr>
-  <tr><td>准入控制器（Admission controller）</td><td>验证或修改资源以执行策略的代码，在认证和授权之后作为 API 准入链的一部分运行。</td></tr>
-</table>
-</div>
-
-<h2 id="next">下一步</h2>
+<p>回忆第 4 章的部署流程：调度 → 拉镜像 → 创建容器 → 运行 → 就绪。每一种常见错误状态，都对应其中某一步失败了：</p>
 
 <figure>
-<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="继续学习 Kubernetes 的路线">
-  <rect class="bx-g" x="20" y="60" width="160" height="100" rx="12"/>
-  <text class="ttl on-g" x="100" y="88" text-anchor="middle">✓ 你在这里</text>
-  <text class="sm" x="100" y="112" text-anchor="middle">核心对象、网络、</text>
-  <text class="sm" x="100" y="130" text-anchor="middle">存储、配置、安全</text>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="Pod 启动的五个阶段以及每个阶段可能出现的错误状态">
+  <rect class="bx" x="20" y="30" width="130" height="56" rx="10"/>
+  <text class="ttl" x="85" y="54" text-anchor="middle">① 调度</text>
+  <text class="sm" x="85" y="74" text-anchor="middle">选一个节点</text>
+  <rect class="bx" x="170" y="30" width="130" height="56" rx="10"/>
+  <text class="ttl" x="235" y="54" text-anchor="middle">② 拉镜像</text>
+  <text class="sm" x="235" y="74" text-anchor="middle">节点下载镜像</text>
+  <rect class="bx" x="320" y="30" width="130" height="56" rx="10"/>
+  <text class="ttl" x="385" y="54" text-anchor="middle">③ 创建容器</text>
+  <text class="sm" x="385" y="74" text-anchor="middle">挂卷、注入配置</text>
+  <rect class="bx" x="470" y="30" width="130" height="56" rx="10"/>
+  <text class="ttl" x="535" y="54" text-anchor="middle">④ 运行</text>
+  <text class="sm" x="535" y="74" text-anchor="middle">应用进程启动</text>
+  <rect class="bx" x="620" y="30" width="120" height="56" rx="10"/>
+  <text class="ttl" x="680" y="54" text-anchor="middle">⑤ 就绪</text>
+  <text class="sm" x="680" y="74" text-anchor="middle">能接流量</text>
+  <path class="ln" d="M152 58 H166" marker-end="url(#ar)"/>
+  <path class="ln" d="M302 58 H316" marker-end="url(#ar)"/>
+  <path class="ln" d="M452 58 H466" marker-end="url(#ar)"/>
+  <path class="ln" d="M602 58 H616" marker-end="url(#ar)"/>
 
-  <rect class="bx-b" x="220" y="20" width="160" height="80" rx="12"/>
-  <text class="ttl on-b" x="300" y="46" text-anchor="middle">打牢容器基础</text>
-  <text class="sm" x="300" y="68" text-anchor="middle">Dockerfile、镜像、</text>
-  <text class="sm" x="300" y="86" text-anchor="middle">多容器应用</text>
-  <rect class="bx-b" x="220" y="120" width="160" height="80" rx="12"/>
-  <text class="ttl on-b" x="300" y="146" text-anchor="middle">补齐本书未展开的</text>
-  <text class="sm" x="300" y="168" text-anchor="middle">探针、HPA、Job、</text>
-  <text class="sm" x="300" y="186" text-anchor="middle">DaemonSet、NetworkPolicy</text>
+  <rect class="bx-r" x="20" y="120" width="130" height="110" rx="10"/>
+  <text class="ttl on-r" x="85" y="144" text-anchor="middle">Pending</text>
+  <text class="sm" x="85" y="168" text-anchor="middle">资源不够</text>
+  <text class="sm" x="85" y="186" text-anchor="middle">PVC 未绑定</text>
+  <text class="sm" x="85" y="204" text-anchor="middle">污点/亲和性</text>
+  <text class="sm" x="85" y="222" text-anchor="middle">→ 案例 1、6</text>
 
-  <rect class="bx-p" x="420" y="20" width="160" height="80" rx="12"/>
-  <text class="ttl on-p" x="500" y="46" text-anchor="middle">工程化交付</text>
-  <text class="sm" x="500" y="68" text-anchor="middle">Helm、Kustomize、</text>
-  <text class="sm" x="500" y="86" text-anchor="middle">GitOps（Argo CD/Flux）</text>
-  <rect class="bx-p" x="420" y="120" width="160" height="80" rx="12"/>
-  <text class="ttl on-p" x="500" y="146" text-anchor="middle">可观测性</text>
-  <text class="sm" x="500" y="168" text-anchor="middle">Prometheus、Grafana、</text>
-  <text class="sm" x="500" y="186" text-anchor="middle">日志与链路追踪</text>
+  <rect class="bx-r" x="170" y="120" width="130" height="110" rx="10"/>
+  <text class="ttl on-r" x="235" y="144" text-anchor="middle">ErrImagePull</text>
+  <text class="ttl on-r" x="235" y="162" text-anchor="middle" style="font-size:12px">ImagePullBackOff</text>
+  <text class="sm" x="235" y="186" text-anchor="middle">名字/标签写错</text>
+  <text class="sm" x="235" y="204" text-anchor="middle">私有仓库没凭据</text>
+  <text class="sm" x="235" y="222" text-anchor="middle">→ 案例 2</text>
 
-  <rect class="bx-a" x="620" y="60" width="120" height="100" rx="12"/>
-  <text class="ttl on-a" x="680" y="88" text-anchor="middle">融入社区</text>
-  <text class="sm" x="680" y="112" text-anchor="middle">线上群组、</text>
-  <text class="sm" x="680" y="130" text-anchor="middle">本地 Meetup</text>
+  <rect class="bx-r" x="320" y="120" width="130" height="110" rx="10"/>
+  <text class="ttl on-r" x="385" y="144" text-anchor="middle" style="font-size:11.5px">CreateContainer-</text>
+  <text class="ttl on-r" x="385" y="162" text-anchor="middle" style="font-size:11.5px">ConfigError</text>
+  <text class="sm" x="385" y="186" text-anchor="middle">ConfigMap/Secret</text>
+  <text class="sm" x="385" y="204" text-anchor="middle">不存在或缺键</text>
+  <text class="sm" x="385" y="222" text-anchor="middle">→ 案例 5</text>
 
-  <path class="ln" d="M182 100 L216 62" marker-end="url(#ar)"/>
-  <path class="ln" d="M182 120 L216 158" marker-end="url(#ar)"/>
-  <path class="ln" d="M382 60 H416" marker-end="url(#ar)"/>
-  <path class="ln" d="M382 160 H416" marker-end="url(#ar)"/>
-  <path class="ln" d="M582 60 L616 96" marker-end="url(#ar)"/>
-  <path class="ln" d="M582 160 L616 124" marker-end="url(#ar)"/>
+  <rect class="bx-r" x="470" y="120" width="130" height="110" rx="10"/>
+  <text class="ttl on-r" x="535" y="144" text-anchor="middle">CrashLoopBackOff</text>
+  <text class="ttl on-r" x="535" y="162" text-anchor="middle">OOMKilled</text>
+  <text class="sm" x="535" y="186" text-anchor="middle">应用报错退出</text>
+  <text class="sm" x="535" y="204" text-anchor="middle">内存超限被杀</text>
+  <text class="sm" x="535" y="222" text-anchor="middle">→ 案例 3、4</text>
+
+  <rect class="bx-a" x="620" y="120" width="120" height="110" rx="10"/>
+  <text class="ttl on-a" x="680" y="144" text-anchor="middle">Running</text>
+  <text class="ttl on-a" x="680" y="162" text-anchor="middle">但 0/1</text>
+  <text class="sm" x="680" y="186" text-anchor="middle">就绪探针失败</text>
+  <text class="sm" x="680" y="204" text-anchor="middle">不在 Service 里</text>
+  <text class="sm" x="680" y="222" text-anchor="middle">→ 第 18 章</text>
+
+  <path class="ln-r" d="M85 88 V116"/><path class="ln-r" d="M235 88 V116"/><path class="ln-r" d="M385 88 V116"/><path class="ln-r" d="M535 88 V116"/><path class="ln-d" d="M680 88 V116"/>
+  <text class="sm" x="380" y="266" text-anchor="middle">另外两类常见问题不在 Pod 内部：Service 访问不通（案例 7）、发布卡住（案例 8）</text>
 </svg>
-<figcaption>图 A-2　一条建议的进阶路线（中间两列是本教程补充的建议，并非原书内容）</figcaption>
+<figcaption>图 17-2　看到状态，就知道该往哪一步查</figcaption>
 </figure>
 
-<ul>
-  <li><strong>容器与 AI</strong>：原书作者的 <em>Getting Started with Docker</em>（约 100 页，含一个多容器 AI 应用，一天就能上手）和 <em>Docker Deep Dive</em> 适合继续深入容器。</li>
-  <li><strong>参与社区</strong>：云原生社区里有很多乐于助人的人。加入线上的 Kubernetes 群组和讨论，找找本地的 Kubernetes / 云原生 Meetup。</li>
-  <li><strong>反复动手</strong>：把每章的「动手练习」都做一遍；隔一天再重读一章——新概念需要时间沉淀，这很正常。</li>
-  <li><strong>关注版本更新</strong>：Kubernetes 每年约发布 3 个版本，原书也每年更新。示例仓库地址：<code>github.com/nigelpoulton/TKB</code>（2026 分支）。</li>
-</ul>
+<p>准备工作：所有示例都在仓库的 <code>extras/troubleshooting</code> 目录下执行。</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ cd extras/troubleshooting
+</pre>
+</div>
+
+<h2 id="pending">案例 1：Pending —— 没有节点放得下</h2>
+
+<div class="code" data-lang="yaml" data-file="extras/troubleshooting/01-pending.yml（节选）">
+<pre>
+    resources:
+      requests:
+        cpu: "64"          # 要 64 个 CPU 核
+        memory: 500Gi      # 和 500G 内存
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f 01-pending.yml
+pod/tb-pending created
+
+$ kubectl get pods
+NAME         READY   STATUS    RESTARTS   AGE
+tb-pending   0/1     Pending   0          45s
+
+$ kubectl describe pod tb-pending
+...
+Node:             &lt;none&gt;                  # ← 还没被分配到任何节点
+Events:
+  Type     Reason            Age   From               Message
+  ----     ------            ----  ----               -------
+  Warning  FailedScheduling  45s   default-scheduler  0/3 nodes are available: 3 Insufficient cpu,
+           3 Insufficient memory. preemption: 0/3 nodes are available: 3 No preemption victims
+           found for incoming pod.
+</pre>
+</div>
+
+<p>
+  <code>Node: &lt;none&gt;</code> 和 <code>FailedScheduling</code> 说明问题出在<strong>调度</strong>这一步：调度器在过滤阶段（第 2 章）就把所有节点都排除了。
+  消息会逐条告诉你每个节点被排除的原因：
+</p>
+
+<div class="tw">
+<table>
+  <tr><th>FailedScheduling 里的提示</th><th>含义</th><th>怎么办</th></tr>
+  <tr><td><code>Insufficient cpu / memory</code></td><td>节点剩余资源小于 Pod 的 <strong>requests</strong></td><td>调小 requests，或加节点（开启集群自动扩缩时会自动加）</td></tr>
+  <tr><td><code>had untolerated taint {...}</code></td><td>节点有污点，Pod 没有对应的容忍</td><td>加 tolerations，或调度到别的节点</td></tr>
+  <tr><td><code>didn't match Pod's node affinity/selector</code></td><td>nodeSelector / 亲和性规则没有节点满足</td><td>检查节点标签：<code>kubectl get nodes --show-labels</code></td></tr>
+  <tr><td><code>pod has unbound immediate PersistentVolumeClaims</code></td><td>Pod 用的 PVC 还没绑定到 PV</td><td>见案例 6</td></tr>
+</table>
+</div>
 
 <div class="box tip">
-  <div class="t">&#128161; 最后一句话</div>
+  <div class="t">&#128161; 看看节点还剩多少</div>
+  <p><code>kubectl describe node &lt;节点&gt;</code> 里的 <strong>Allocated resources</strong> 一节列出了节点上所有 Pod 的 requests 总和。调度器看的是 requests，而不是实际用量。</p>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl delete -f 01-pending.yml
+</pre>
+</div>
+
+<h2 id="imagepull">案例 2：ImagePullBackOff —— 镜像拉不下来</h2>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f 02-imagepull.yml          # image: nginx:9.99.99（不存在的标签）
+
+$ kubectl get pods --watch
+NAME           READY   STATUS             RESTARTS   AGE
+tb-imagepull   0/1     ContainerCreating  0          1s
+tb-imagepull   0/1     ErrImagePull       0          3s
+tb-imagepull   0/1     ImagePullBackOff   0          15s
+
+$ kubectl describe pod tb-imagepull
+Events:
+  Type     Reason   Age   From     Message
+  ----     ------   ----  ----     -------
+  Normal   Pulling  20s   kubelet  Pulling image "nginx:9.99.99"
+  Warning  Failed   18s   kubelet  Failed to pull image "nginx:9.99.99": ... failed to resolve
+           reference "docker.io/library/nginx:9.99.99": docker.io/library/nginx:9.99.99: not found
+  Warning  Failed   18s   kubelet  Error: ErrImagePull
+  Normal   BackOff  5s    kubelet  Back-off pulling image "nginx:9.99.99"
+  Warning  Failed   5s    kubelet  Error: ImagePullBackOff
+</pre>
+</div>
+
+<p>
+  <code>ErrImagePull</code> 是「这次拉失败了」，<code>ImagePullBackOff</code> 是「失败了好几次，kubelet 正在等待一段越来越长的时间后再试」。
+  关键是看 <code>Failed to pull image</code> 后面的原因：
+</p>
+
+<div class="tw">
+<table>
+  <tr><th>报错里的关键词</th><th>常见原因</th></tr>
+  <tr><td><code>not found</code> / <code>manifest unknown</code></td><td>镜像名或标签拼错了，或者那个标签根本不存在</td></tr>
+  <tr><td><code>pull access denied</code> / <code>unauthorized</code></td><td>私有仓库，Pod 没有配置 <code>imagePullSecrets</code></td></tr>
+  <tr><td><code>no match for platform in manifest</code></td><td>镜像没有当前节点 CPU 架构（amd64/arm64）的版本</td></tr>
+  <tr><td><code>i/o timeout</code> / <code>dial tcp</code></td><td>节点访问不了镜像仓库（网络、DNS、代理、防火墙）</td></tr>
+  <tr><td><code>toomanyrequests</code></td><td>触发了 Docker Hub 的匿名拉取频率限制</td></tr>
+</table>
+</div>
+
+<p>修复：改成正确的标签（比如 <code>nginx:1.27</code>）再 apply。注意 Pod 的大部分字段不可变，但<strong>镜像</strong>恰好是少数允许修改的字段之一，所以直接 apply 新镜像就行。</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl delete -f 02-imagepull.yml
+</pre>
+</div>
+
+<h2 id="crashloop">案例 3：CrashLoopBackOff —— 应用反复崩溃</h2>
+
+<div class="code" data-lang="yaml" data-file="extras/troubleshooting/03-crashloop.yml（节选）">
+<pre>
+    command: ["sh", "-c", "echo 'connecting to database db:5432...'; sleep 3; echo 'FATAL: database not reachable' &gt;&amp;2; exit 1"]
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f 03-crashloop.yml
+
+$ kubectl get pods
+NAME           READY   STATUS             RESTARTS      AGE
+tb-crashloop   0/1     CrashLoopBackOff   3 (25s ago)   80s
+</pre>
+</div>
+
+<p>
+  <strong>CrashLoopBackOff 不是错误本身，而是一个「症状」</strong>：容器启动 → 退出 → kubelet 按重启策略（默认 <code>Always</code>，第 4 章）重启它 → 又退出……
+  每次重启前等待的时间会翻倍，最长 5 分钟：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 170" role="img" aria-label="CrashLoopBackOff 的重启等待时间指数增长">
+  <path class="ln" d="M20 100 H740" marker-end="url(#ar)"/>
+  <g>
+    <rect class="bx-r" x="30" y="80" width="26" height="40" rx="4"/><text class="sm" x="43" y="140" text-anchor="middle">崩</text>
+    <text class="sm" x="80" y="74" text-anchor="middle">10s</text><path class="ln-d" d="M58 90 H104"/>
+    <rect class="bx-r" x="106" y="80" width="26" height="40" rx="4"/><text class="sm" x="119" y="140" text-anchor="middle">崩</text>
+    <text class="sm" x="170" y="74" text-anchor="middle">20s</text><path class="ln-d" d="M134 90 H204"/>
+    <rect class="bx-r" x="206" y="80" width="26" height="40" rx="4"/><text class="sm" x="219" y="140" text-anchor="middle">崩</text>
+    <text class="sm" x="295" y="74" text-anchor="middle">40s</text><path class="ln-d" d="M234 90 H354"/>
+    <rect class="bx-r" x="356" y="80" width="26" height="40" rx="4"/><text class="sm" x="369" y="140" text-anchor="middle">崩</text>
+    <text class="sm" x="470" y="74" text-anchor="middle">80s → 160s → …</text><path class="ln-d" d="M384 90 H560"/>
+    <rect class="bx-r" x="562" y="80" width="26" height="40" rx="4"/><text class="sm" x="575" y="140" text-anchor="middle">崩</text>
+    <text class="sm on-r" x="665" y="74" text-anchor="middle">封顶 5 分钟</text><path class="ln-d" d="M590 90 H730"/>
+  </g>
+  <text class="sm" x="380" y="30" text-anchor="middle">STATUS 在 Running、Error、CrashLoopBackOff 之间来回切换；RESTARTS 不断增加</text>
+  <text class="sm" x="380" y="164" text-anchor="middle">容器稳定运行一段时间后，计时会重置</text>
+</svg>
+<figcaption>图 17-3　指数退避：防止一个坏掉的容器把节点拖垮</figcaption>
+</figure>
+
+<p>真正的原因要在两处找：<strong>退出码</strong>和<strong>上一次的日志</strong>。</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl describe pod tb-crashloop
+...
+    State:          Waiting
+      Reason:       CrashLoopBackOff
+    Last State:     Terminated
+      Reason:       Error
+      Exit Code:    1                 # ← 应用自己以错误码 1 退出
+      Started:      ...
+      Finished:     ...
+    Restart Count:  3
+Events:
+  Warning  BackOff  10s (x6 over 75s)  kubelet  Back-off restarting failed container ctr in pod ...
+
+$ kubectl logs tb-crashloop               # 当前这次可能还没输出或刚重启
+$ kubectl logs tb-crashloop --previous    # ← 看「上一次」崩溃时的日志
+connecting to database db:5432...
+FATAL: database not reachable
+</pre>
+</div>
+
+<h3>常见退出码</h3>
+<div class="tw">
+<table>
+  <tr><th>退出码</th><th>含义</th><th>排查方向</th></tr>
+  <tr><td><code>0</code></td><td>正常结束</td><td>进程跑完就退出了：长期服务不该退出，检查启动命令；一次性任务应该用 Job（重启策略也别用 Always）</td></tr>
+  <tr><td><code>1</code> 等</td><td>应用自己报错退出</td><td>看 <code>logs --previous</code>：配置错误、依赖连不上、参数不对……</td></tr>
+  <tr><td><code>126</code> / <code>127</code></td><td>命令不能执行 / 找不到</td><td><code>command</code> 写错，或镜像里没有这个程序（比如精简镜像里没有 <code>sh</code>）</td></tr>
+  <tr><td><code>137</code></td><td>被 SIGKILL 杀死（128+9）</td><td>最常见是内存超限 → 案例 4；也可能是存活探针失败后被重启（第 18 章）</td></tr>
+  <tr><td><code>143</code></td><td>收到 SIGTERM 后退出（128+15）</td><td>正常的关闭流程，比如滚动更新、删除 Pod</td></tr>
+</table>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 容器一启动就崩，没法 exec 进去怎么办？</div>
   <p>
-    如果只记住一件事，请记住：<strong>你用 YAML 声明期望状态，Kubernetes 的控制器永不停歇地把现实调和成你想要的样子。</strong>
-    全书的每一章，都是这句话在不同对象上的展开。
+    临时把启动命令改成 <code>["sleep", "3600"]</code>，Pod 就会稳定运行，然后 <code>kubectl exec -it</code> 进去手动执行原来的启动命令，
+    看看环境变量、配置文件、网络连通性到底哪里不对。查清后记得改回来。也可以用后面介绍的 <code>kubectl debug</code>。
   </p>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl delete -f 03-crashloop.yml
+</pre>
+</div>
+
+<h2 id="oom">案例 4：OOMKilled —— 内存超限被杀</h2>
+
+<div class="code" data-lang="yaml" data-file="extras/troubleshooting/04-oomkilled.yml（节选）">
+<pre>
+    command: ["sh", "-c", "tail /dev/zero"]    # 不停地往内存里缓存数据
+    resources:
+      requests:
+        memory: 32Mi
+      limits:
+        memory: 64Mi                            # 上限 64Mi
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f 04-oomkilled.yml
+
+$ kubectl get pods
+NAME           READY   STATUS      RESTARTS     AGE
+tb-oomkilled   0/1     OOMKilled   1 (3s ago)   10s
+
+$ kubectl describe pod tb-oomkilled
+    Last State:     Terminated
+      Reason:       OOMKilled        # ← 关键字
+      Exit Code:    137
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="内存超过 limit 时容器被内核 OOM killer 杀死，而 CPU 超限只会被限流">
+  <rect class="bx" x="20" y="20" width="350" height="160" rx="14"/>
+  <text class="ttl" x="195" y="44" text-anchor="middle">内存：超了就杀</text>
+  <rect class="bx" x="50" y="64" width="290" height="30" rx="6"/>
+  <rect class="bx-r" x="50" y="64" width="290" height="30" rx="6"/>
+  <text class="sm on-r" x="195" y="84" text-anchor="middle">使用量 → 64Mi limit ✗</text>
+  <text class="sm" x="195" y="122" text-anchor="middle">内核 OOM killer 发送 SIGKILL</text>
+  <text class="sm" x="195" y="142" text-anchor="middle">→ Exit Code 137 → kubelet 重启容器</text>
+  <text class="sm on-r" x="195" y="166" text-anchor="middle">反复发生 → CrashLoopBackOff</text>
+
+  <rect class="bx" x="390" y="20" width="350" height="160" rx="14"/>
+  <text class="ttl" x="565" y="44" text-anchor="middle">CPU：超了只会变慢</text>
+  <rect class="bx-a" x="420" y="64" width="290" height="30" rx="6"/>
+  <text class="sm on-a" x="565" y="84" text-anchor="middle">使用量 → CPU limit（被限流）</text>
+  <text class="sm" x="565" y="122" text-anchor="middle">CPU 是「可压缩」资源：不杀进程，</text>
+  <text class="sm" x="565" y="142" text-anchor="middle">只是少分时间片（throttling）</text>
+  <text class="sm on-a" x="565" y="166" text-anchor="middle">症状：响应变慢、探针超时</text>
+</svg>
+<figcaption>图 17-4　内存和 CPU 超限的后果完全不同（第 18 章详细讲）</figcaption>
+</figure>
+
+<p>修复思路：</p>
+<ul>
+  <li>先确认应用<strong>正常情况下</strong>需要多少内存（<code>kubectl top pod</code>，需要 metrics-server），把 limits 设得留有余量；</li>
+  <li>如果内存随时间不断上涨直到被杀，多半是<strong>内存泄漏</strong>，调大 limit 只能推迟问题；</li>
+  <li>JVM、Node.js 等运行时要让它们<strong>感知容器的内存上限</strong>（比如调整堆大小参数），否则它们可能按宿主机内存来分配。</li>
+</ul>
+
+<div class="box note">
+  <div class="t">&#9432; OOMKilled 和「被驱逐」不是一回事</div>
+  <p>
+    OOMKilled 是容器超过<strong>自己的 limit</strong>。还有一种情况是<strong>节点整体</strong>内存紧张，kubelet 主动驱逐（Evicted）一些 Pod 腾地方，
+    这时 Pod 状态是 <code>Evicted</code>，<code>describe node</code> 会看到 <code>MemoryPressure</code>。谁先被驱逐由 QoS 等级决定，见第 18 章。
+  </p>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl delete -f 04-oomkilled.yml
+</pre>
+</div>
+
+<h2 id="config">案例 5：CreateContainerConfigError —— 配置缺失</h2>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f 05-config-missing.yml     # 引用了不存在的 ConfigMap app-config
+
+$ kubectl get pods
+NAME        READY   STATUS                       RESTARTS   AGE
+tb-config   0/1     CreateContainerConfigError   0          12s
+
+$ kubectl describe pod tb-config
+Events:
+  Warning  Failed  5s (x3 over 12s)  kubelet  Error: configmap "app-config" not found
+</pre>
+</div>
+
+<p>
+  镜像已经拉好了，但 kubelet 在<strong>创建容器</strong>时要把 ConfigMap 的值注入环境变量（第 11 章），找不到就停在这一步。
+  同类问题还有：ConfigMap 存在但<strong>缺少某个键</strong>（<code>couldn't find key log-level in ConfigMap</code>）、Secret 不存在、ConfigMap 和 Pod <strong>不在同一个 Namespace</strong>。
+  修复：创建它，Pod 会自动继续启动。
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl create configmap app-config --from-literal log-level=debug
+$ kubectl get pods
+NAME        READY   STATUS    RESTARTS   AGE
+tb-config   1/1     Running   0          50s
+
+$ kubectl logs tb-config
+LOG_LEVEL=debug
+
+$ kubectl delete -f 05-config-missing.yml
+$ kubectl delete configmap app-config
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 可选的配置</div>
+  <p>如果某个配置项确实可有可无，可以在 <code>configMapKeyRef</code> 里加 <code>optional: true</code>，找不到时容器照常启动，环境变量为空。</p>
+</div>
+
+<h2 id="pvc">案例 6：PVC 一直 Pending</h2>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f 07-pvc-pending.yml       # storageClassName: does-not-exist
+
+$ kubectl get pvc,pod
+NAME                           STATUS    VOLUME   CAPACITY   ACCESS MODES   STORAGECLASS
+persistentvolumeclaim/tb-pvc   Pending                                      does-not-exist
+
+NAME             READY   STATUS    RESTARTS   AGE
+pod/tb-pvc-pod   0/1     Pending   0          20s
+
+$ kubectl describe pvc tb-pvc
+Events:
+  Warning  ProvisioningFailed  5s (x3 over 20s)  persistentvolume-controller
+           storageclass.storage.k8s.io "does-not-exist" not found
+
+$ kubectl describe pod tb-pvc-pod
+Events:
+  Warning  FailedScheduling  20s  default-scheduler  0/3 nodes are available:
+           pod has unbound immediate PersistentVolumeClaims. ...
+</pre>
+</div>
+
+<p>Pod 的问题其实来自 PVC，所以要<strong>顺着引用链往下查</strong>：Pod → PVC → StorageClass → CSI 插件（第 10 章）。PVC 卡住的常见原因：</p>
+
+<div class="tw">
+<table>
+  <tr><th>现象</th><th>原因</th></tr>
+  <tr><td><code>storageclass ... not found</code></td><td>SC 名字写错，或集群上没有这个 SC（换云/换本地集群时最常见）</td></tr>
+  <tr><td><code>waiting for first consumer to be created before binding</code></td><td><strong>不是错误！</strong>SC 是 <code>WaitForFirstConsumer</code> 模式，有 Pod 使用后才会创建卷</td></tr>
+  <tr><td><code>waiting for a volume to be created ... by external provisioner</code> 很久不动</td><td>CSI 插件没装、没运行，或云端配额不足——去 <code>kube-system</code> 查插件 Pod 的日志</td></tr>
+  <tr><td>没写 <code>storageClassName</code> 且一直 Pending</td><td>集群没有默认 SC：<code>kubectl get sc</code> 看有没有 <code>(default)</code></td></tr>
+</table>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl get sc                     # 看看集群里有哪些 SC，哪个是默认
+$ kubectl delete -f 07-pvc-pending.yml
+</pre>
+</div>
+
+<p>修复：把 <code>storageClassName</code> 改成 <code>kubectl get sc</code> 里存在的名字。注意 PVC 的 <code>storageClassName</code> 创建后不能修改，要删掉重建。</p>
+
+<h2 id="service">案例 7：Service 访问不通</h2>
+
+<p>
+  这是最让新手抓狂的一类：Pod 明明都是 Running，就是访问不到。诀窍是<strong>沿着流量路径一段一段排查</strong>，每一段都有对应的检查命令：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="Service 访问不通时沿流量路径逐段排查">
+  <rect class="bx" x="20" y="20" width="130" height="62" rx="10"/>
+  <text class="ttl" x="85" y="46" text-anchor="middle">① DNS</text>
+  <text class="sm" x="85" y="68" text-anchor="middle">名字能解析吗</text>
+  <rect class="bx-a" x="170" y="20" width="130" height="62" rx="10"/>
+  <text class="ttl on-a" x="235" y="46" text-anchor="middle">② Service</text>
+  <text class="sm" x="235" y="68" text-anchor="middle">存在？端口对？</text>
+  <rect class="bx-p" x="320" y="20" width="130" height="62" rx="10"/>
+  <text class="ttl on-p" x="385" y="46" text-anchor="middle">③ Endpoints</text>
+  <text class="sm" x="385" y="68" text-anchor="middle">有 Pod 吗？</text>
+  <rect class="bx-b" x="470" y="20" width="130" height="62" rx="10"/>
+  <text class="ttl on-b" x="535" y="46" text-anchor="middle">④ Pod 就绪</text>
+  <text class="sm" x="535" y="68" text-anchor="middle">READY 是 1/1 吗</text>
+  <rect class="bx-g" x="620" y="20" width="120" height="62" rx="10"/>
+  <text class="ttl on-g" x="680" y="46" text-anchor="middle">⑤ 端口</text>
+  <text class="sm" x="680" y="68" text-anchor="middle">应用真在听吗</text>
+  <path class="ln" d="M152 51 H166" marker-end="url(#ar)"/>
+  <path class="ln" d="M302 51 H316" marker-end="url(#ar)"/>
+  <path class="ln" d="M452 51 H466" marker-end="url(#ar)"/>
+  <path class="ln" d="M602 51 H616" marker-end="url(#ar)"/>
+
+  <rect class="bx-d" x="20" y="100" width="130" height="150" rx="10"/>
+  <text class="mono sm" x="30" y="122">nslookup svc</text>
+  <text class="sm" x="30" y="148">失败 → 名字/NS</text>
+  <text class="sm" x="30" y="166">写错？跨 NS 要</text>
+  <text class="sm" x="30" y="184">用 FQDN；或集群</text>
+  <text class="sm" x="30" y="202">DNS 故障（第 9 章）</text>
+  <rect class="bx-d" x="170" y="100" width="130" height="150" rx="10"/>
+  <text class="mono sm" x="180" y="122">get svc</text>
+  <text class="sm" x="180" y="148">port 是你访问的</text>
+  <text class="sm" x="180" y="166">那个端口吗？</text>
+  <text class="sm" x="180" y="184">类型对吗（外部</text>
+  <text class="sm" x="180" y="202">访问要 NodePort/LB）</text>
+  <rect class="bx-d" x="320" y="100" width="130" height="150" rx="10"/>
+  <text class="mono sm" x="330" y="122" style="font-size:10px">get endpointslices</text>
+  <text class="sm" x="330" y="148">空的 → 选择器和</text>
+  <text class="sm" x="330" y="166">Pod 标签不匹配</text>
+  <text class="sm on-p" x="330" y="184">最常见的原因！</text>
+  <text class="mono sm" x="330" y="210">--show-labels</text>
+  <rect class="bx-d" x="470" y="100" width="130" height="150" rx="10"/>
+  <text class="mono sm" x="480" y="122">get pods</text>
+  <text class="sm" x="480" y="148">0/1 的 Pod 会被</text>
+  <text class="sm" x="480" y="166">移出端点列表：</text>
+  <text class="sm" x="480" y="184">查就绪探针</text>
+  <text class="sm" x="480" y="202">（第 18 章）</text>
+  <rect class="bx-d" x="620" y="100" width="120" height="150" rx="10"/>
+  <text class="mono sm" x="630" y="122">port-forward</text>
+  <text class="sm" x="630" y="148">targetPort =</text>
+  <text class="sm" x="630" y="166">应用监听端口？</text>
+  <text class="sm" x="630" y="184">应用监听的是</text>
+  <text class="sm" x="630" y="202">0.0.0.0 吗？</text>
+  <text class="sm" x="380" y="278" text-anchor="middle">从左往右逐段排除；哪一段先出问题，就修哪一段</text>
+</svg>
+<figcaption>图 17-5　Service 不通的五段式排查</figcaption>
+</figure>
+
+<p>部署示例：一个健康的 Deployment，前面有两个各有毛病的 Service。</p>
+
+<div class="code" data-lang="yaml" data-file="extras/troubleshooting/06-service.yml（节选）">
+<pre>
+kind: Service
+metadata:
+  name: svc-typo
+spec:
+  selector:
+    app: wbe              # ← 拼错了，Pod 的标签是 app: web
+---
+kind: Service
+metadata:
+  name: svc-wrongport
+spec:
+  selector:
+    app: web
+  ports:
+  - port: 80
+    targetPort: 8080      # ← nginx 实际监听的是 80
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f 06-service.yml
+
+# 起一个临时 Pod 当「客户端」，退出后自动删除
+$ kubectl run tmp --rm -it --image=busybox:1.36 --restart=Never -- sh
+/ # nslookup svc-typo                  # ① DNS 正常，能解析出 ClusterIP
+/ # wget -qO- -T 3 svc-typo            # 不通
+/ # wget -qO- -T 3 svc-wrongport       # 也不通：Connection refused
+/ # exit
+</pre>
+</div>
+
+<p>DNS 没问题，那就往下查 ③ 端点：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl get endpointslices -l kubernetes.io/service-name=svc-typo
+NAME             ADDRESSTYPE   PORTS     ENDPOINTS   AGE
+svc-typo-8xk2p   IPv4          &lt;unset&gt;   &lt;unset&gt;     2m        # ← 一个 Pod 都没有！
+
+$ kubectl describe svc svc-typo | grep -i -E "selector|endpoints"
+Selector:          app=wbe
+Endpoints:
+
+$ kubectl get pods --show-labels
+NAME                      READY   STATUS    LABELS
+tb-web-6d4b9c8f7c-2xqlk   1/1     Running   app=web,pod-template-hash=6d4b9c8f7c
+tb-web-6d4b9c8f7c-k9mzp   1/1     Running   app=web,pod-template-hash=6d4b9c8f7c
+</pre>
+</div>
+
+<p>选择器 <code>app=wbe</code> 和 Pod 标签 <code>app=web</code> 对不上，端点自然为空。再看 svc-wrongport：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl get endpointslices -l kubernetes.io/service-name=svc-wrongport
+NAME                  ADDRESSTYPE   PORTS   ENDPOINTS                AGE
+svc-wrongport-7fq9d   IPv4          8080    10.244.1.5,10.244.2.7    2m   # 有 Pod，但端口是 8080
+
+# 绕过 Service，直接连 Pod，确认应用到底在哪个端口
+$ kubectl port-forward deploy/tb-web 8888:80
+Forwarding from 127.0.0.1:8888 -&gt; 80
+# 另开一个终端：curl localhost:8888 能看到 nginx 欢迎页 → 应用在 80 端口
+</pre>
+</div>
+
+<p>端点有了，但端口是 8080，而 nginx 只监听 80。修复：<code>svc-typo</code> 的选择器改成 <code>app: web</code>，<code>svc-wrongport</code> 的 <code>targetPort</code> 改成 <code>80</code>，重新 apply。</p>
+
+<div class="box warn">
+  <div class="t">&#9888; 另外两个隐蔽的坑</div>
+  <ul>
+    <li><strong>应用只监听 127.0.0.1</strong>：在容器里 curl localhost 能通，但从别的 Pod 访问不通。应用要监听 <code>0.0.0.0</code>。</li>
+    <li><strong>NetworkPolicy</strong>：如果集群里有网络策略默认拒绝流量，以上全部正确也会不通，用 <code>kubectl get networkpolicy -A</code> 看看。</li>
+  </ul>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl delete -f 06-service.yml
+</pre>
+</div>
+
+<h2 id="rollout">案例 8：发布卡住了</h2>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f 08-rollout-stuck.yml        # 先正常部署 3 个副本
+$ kubectl set image deploy/tb-rollout nginx=nginx:9.99.99   # 模拟发布了一个坏镜像
+
+$ kubectl rollout status deploy/tb-rollout
+Waiting for deployment "tb-rollout" rollout to finish: 1 out of 3 new replicas have been updated...
+error: deployment "tb-rollout" exceeded its progress deadline
+
+$ kubectl get pods
+NAME                          READY   STATUS             RESTARTS   AGE
+tb-rollout-5c8d7b9f6d-4hjkl   1/1     Running            0          3m
+tb-rollout-5c8d7b9f6d-p2x8q   1/1     Running            0          3m
+tb-rollout-7f6c9d8b5-qw3er    0/1     ImagePullBackOff   0          70s
+tb-rollout-7f6c9d8b5-zx9cv    0/1     ImagePullBackOff   0          70s
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="发布卡住时旧 ReplicaSet 的 Pod 仍然在提供服务">
+  <rect class="bx-b" x="20" y="20" width="330" height="120" rx="12"/>
+  <text class="ttl on-b" x="185" y="44" text-anchor="middle">旧 ReplicaSet（nginx:1.27）</text>
+  <rect class="bx-g" x="50" y="64" width="120" height="50" rx="8"/><text class="sm on-g" x="110" y="94" text-anchor="middle">Running ✓</text>
+  <rect class="bx-g" x="200" y="64" width="120" height="50" rx="8"/><text class="sm on-g" x="260" y="94" text-anchor="middle">Running ✓</text>
+  <rect class="bx-r" x="410" y="20" width="330" height="120" rx="12"/>
+  <text class="ttl on-r" x="575" y="44" text-anchor="middle">新 ReplicaSet（nginx:9.99.99）</text>
+  <rect class="bx" x="440" y="64" width="120" height="50" rx="8"/><text class="sm on-r" x="500" y="88" text-anchor="middle">ImagePull</text><text class="sm on-r" x="500" y="104" text-anchor="middle">BackOff</text>
+  <rect class="bx" x="590" y="64" width="120" height="50" rx="8"/><text class="sm on-r" x="650" y="88" text-anchor="middle">ImagePull</text><text class="sm on-r" x="650" y="104" text-anchor="middle">BackOff</text>
+  <text class="sm" x="380" y="166" text-anchor="middle">maxUnavailable: 1 只允许先下线 1 个旧 Pod，新 Pod 一直不就绪，发布就停在这里</text>
+  <text class="sm on-g" x="380" y="188" text-anchor="middle">好消息：剩下的 2 个旧 Pod 仍在服务，用户受影响有限 —— 这正是滚动更新的保护作用</text>
+</svg>
+<figcaption>图 17-6　滚动更新自带「刹车」</figcaption>
+</figure>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl describe deploy tb-rollout
+Conditions:
+  Type           Status  Reason
+  ----           ------  ------
+  Available      True    MinimumReplicasAvailable
+  Progressing    False   ProgressDeadlineExceeded     # ← 超过 progressDeadlineSeconds（60 秒）
+
+$ kubectl rollout undo deploy/tb-rollout              # 先回滚止血（第 6 章）
+$ kubectl delete -f 08-rollout-stuck.yml
+</pre>
+</div>
+
+<p>先回滚恢复服务，再按前面的案例查新 Pod 为什么起不来。别忘了回滚后同步修改 YAML 文件，避免下次 apply 又把坏镜像带回来。</p>
+
+<h2 id="toolbox">排错工具箱</h2>
+
+<h3>kubectl debug：给运行中的 Pod 挂一个调试容器</h3>
+
+<p>很多生产镜像非常精简，连 <code>sh</code>、<code>curl</code> 都没有，<code>kubectl exec</code> 进去什么也干不了。<code>kubectl debug</code> 可以往运行中的 Pod 里临时加一个<strong>临时容器（ephemeral container）</strong>：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 196" role="img" aria-label="kubectl debug 向 Pod 中注入临时调试容器">
+  <rect class="bx-b" x="200" y="20" width="360" height="150" rx="14"/>
+  <text class="ttl on-b" x="216" y="44">Pod（共享网络命名空间）</text>
+  <rect class="bx-g" x="226" y="62" width="140" height="84" rx="10"/>
+  <text class="ttl on-g" x="296" y="90" text-anchor="middle">应用容器</text>
+  <text class="sm" x="296" y="112" text-anchor="middle">精简镜像</text>
+  <text class="sm" x="296" y="130" text-anchor="middle">没有 shell / 工具</text>
+  <rect class="bx-a" x="394" y="62" width="140" height="84" rx="10" stroke-dasharray="6 4"/>
+  <text class="ttl on-a" x="464" y="90" text-anchor="middle">临时容器</text>
+  <text class="sm" x="464" y="112" text-anchor="middle">busybox 等</text>
+  <text class="sm" x="464" y="130" text-anchor="middle">带 sh、wget、nslookup</text>
+  <path class="ln-a" d="M392 104 H370" marker-end="url(#ar-a)"/>
+  <text class="mono sm" x="100" y="96" text-anchor="middle">kubectl debug</text>
+  <path class="ln-a" d="M100 108 V182 H464 V150" stroke-dasharray="4 4" marker-end="url(#ar-a)"/>
+  <text class="sm" x="660" y="80" text-anchor="middle">加 --target 可以</text>
+  <text class="sm" x="660" y="98" text-anchor="middle">看到应用容器的进程；</text>
+  <text class="sm" x="660" y="116" text-anchor="middle">不会重启原容器</text>
+</svg>
+<figcaption>图 17-7　不改镜像、不重启，也能进去排查</figcaption>
+</figure>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl debug -it &lt;pod&gt; --image=busybox:1.36 --target=&lt;容器名&gt;
+/ # wget -qO- localhost:80        # 同一个 Pod，共享网络，可以直接访问应用端口
+/ # ps                            # 有 --target 时能看到应用容器的进程
+
+# 复制一个 Pod 出来调试（比如改掉一直崩溃的启动命令），不影响原 Pod
+$ kubectl debug &lt;pod&gt; -it --copy-to=&lt;pod&gt;-debug --container=&lt;容器名&gt; -- sh
+
+# 调试节点：在节点上起一个特权 Pod，宿主机文件系统挂在 /host
+$ kubectl debug node/&lt;节点名&gt; -it --image=busybox:1.36
+</pre>
+</div>
+
+<h3>常用命令速查</h3>
+
+<div class="tw">
+<table>
+  <tr><th>场景</th><th>命令</th></tr>
+  <tr><td>看所有 Namespace 中不健康的 Pod</td><td><code>kubectl get pods -A --field-selector=status.phase!=Running</code></td></tr>
+  <tr><td>按标签看多个 Pod 的日志</td><td><code>kubectl logs -l app=web --all-containers --tail=50</code></td></tr>
+  <tr><td>持续跟踪日志</td><td><code>kubectl logs -f &lt;pod&gt;</code></td></tr>
+  <tr><td>临时客户端 Pod</td><td><code>kubectl run tmp --rm -it --image=busybox:1.36 --restart=Never -- sh</code></td></tr>
+  <tr><td>绕过 Service 直连 Pod / Deployment</td><td><code>kubectl port-forward deploy/&lt;名&gt; 8888:80</code></td></tr>
+  <tr><td>看资源用量（需 metrics-server）</td><td><code>kubectl top pods</code> / <code>kubectl top nodes</code></td></tr>
+  <tr><td>看节点状况</td><td><code>kubectl describe node &lt;节点&gt;</code> 的 Conditions 和 Allocated resources</td></tr>
+  <tr><td>只取某个字段</td><td><code>kubectl get pod &lt;pod&gt; -o jsonpath='{.status.containerStatuses[0].lastState}'</code></td></tr>
+</table>
+</div>
+
+<h3>节点出问题时</h3>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl get nodes
+NAME              STATUS     ROLES    AGE   VERSION
+desktop-worker    NotReady   &lt;none&gt;   2d    v1.35.1
+
+$ kubectl describe node desktop-worker
+Conditions:
+  Type             Status   Reason
+  ----             ------   ------
+  MemoryPressure   False    KubeletHasSufficientMemory
+  DiskPressure     True     KubeletHasDiskPressure          # ← 磁盘快满了
+  PIDPressure      False    KubeletHasSufficientPID
+  Ready            False    KubeletNotReady
+</pre>
+</div>
+
+<p><code>NotReady</code> 通常意味着 kubelet 联系不上控制平面，或者节点资源告急。磁盘满常见于镜像和日志堆积。云上的节点可以直接回收重建；自建集群则要登录节点查看 kubelet 和容器运行时的日志。</p>
+
+<h3>对象删不掉，一直 Terminating</h3>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl get pod &lt;pod&gt; -o jsonpath='{.metadata.finalizers}'   # 有 finalizer 在等某个控制器收尾吗
+$ kubectl delete pod &lt;pod&gt; --grace-period=0 --force            # 最后手段：强制删除
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 强制删除要谨慎</div>
+  <p>
+    强制删除只是从 API 里抹掉记录，并不保证节点上的容器真的停了。对 StatefulSet 的 Pod 尤其危险：可能出现两个同名 Pod 同时写一个卷（第 12 章讲过的数据损坏风险）。
+    Namespace 卡在 Terminating 往往是里面某个资源的 finalizer 在等一个已经被卸载的控制器，应先找到并处理那个资源。
+  </p>
+</div>
+
+<h2 id="summary">小结</h2>
+<ul>
+  <li>排错三板斧：<code>get</code> 看状态，<code>describe</code> 看事件，<code>logs</code>（必要时 <code>--previous</code>）看应用输出。</li>
+  <li>状态对应生命周期：Pending → 调度；ImagePullBackOff → 拉镜像；CreateContainerConfigError → 创建容器；CrashLoopBackOff/OOMKilled → 运行；Running 但 0/1 → 就绪。</li>
+  <li>CrashLoopBackOff 是症状，原因看退出码和上一次的日志；137 多半是 OOM。</li>
+  <li>Service 不通按 DNS → Service → 端点 → Pod 就绪 → 端口逐段查，最常见的是选择器和标签不匹配、targetPort 写错。</li>
+  <li>发布卡住先 <code>rollout undo</code> 止血，再查新 Pod；精简镜像用 <code>kubectl debug</code> 排查。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>把 <code>extras/troubleshooting</code> 里的 8 个文件挨个 apply，<strong>先不看本章</strong>，只用三板斧判断原因，再对照答案。</li>
+    <li>把 <code>03-crashloop.yml</code> 的 <code>exit 1</code> 改成 <code>exit 0</code>，观察 STATUS 和 RESTARTS 有什么变化。想想为什么「正常退出」也会被重启。</li>
+    <li>修好 <code>06-service.yml</code> 的两个 Service，用临时 Pod 验证两个都能访问到 nginx。</li>
+    <li>找一个你自己部署过的应用，用 <code>kubectl debug</code> 挂一个 busybox 进去，在里面 <code>nslookup</code> 一个其他 Namespace 的 Service。</li>
+  </ol>
 </div>
 
 <div id="pager"></div>

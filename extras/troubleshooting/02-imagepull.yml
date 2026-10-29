@@ -1,0 +1,12 @@
+# Broken on purpose: the image tag does not exist.
+# Symptom: ErrImagePull -> ImagePullBackOff.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: tb-imagepull
+  labels:
+    chapter: troubleshooting
+spec:
+  containers:
+  - name: ctr
+    image: nginx:9.99.99

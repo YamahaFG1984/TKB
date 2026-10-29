@@ -1,0 +1,38 @@
+# Namespace-level guard rails:
+#   LimitRange    - default requests/limits for containers that don't set them, plus a max
+#   ResourceQuota - total budget for the whole Namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: res-demo
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: container-defaults
+  namespace: res-demo
+spec:
+  limits:
+  - type: Container
+    defaultRequest:
+      cpu: 100m
+      memory: 128Mi
+    default:
+      cpu: 500m
+      memory: 256Mi
+    max:
+      cpu: "1"
+      memory: 512Mi
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: team-budget
+  namespace: res-demo
+spec:
+  hard:
+    requests.cpu: "2"
+    requests.memory: 2Gi
+    limits.cpu: "4"
+    limits.memory: 4Gi
+    pods: "10"

@@ -1,0 +1,13 @@
+# Broken on purpose: the app exits with an error a few seconds after starting.
+# Symptom: Error -> CrashLoopBackOff, RESTARTS keeps growing.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: tb-crashloop
+  labels:
+    chapter: troubleshooting
+spec:
+  containers:
+  - name: ctr
+    image: busybox:1.36
+    command: ["sh", "-c", "echo 'connecting to database db:5432...'; sleep 3; echo 'FATAL: database not reachable' >&2; exit 1"]

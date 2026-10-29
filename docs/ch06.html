@@ -160,6 +160,11 @@
 <figcaption>图 6-3　HPA 扩 Pod，CA 扩节点：这就是「多维度自动扩缩」</figcaption>
 </figure>
 
+<div class="box tip">
+  <div class="t">&#128161; 想亲手试试 HPA？</div>
+  <p>补充篇<a href="ch18.html">第 18 章</a>有完整的 HPA 动手实验：安装 metrics-server、制造负载、观察副本数自动增减。</p>
+</div>
+
 <p>缩容同理：负载下降时 HPA 减少 Pod，可能触发 CA 移除节点；移除节点前，Kubernetes 会把上面的 Pod 驱逐，并在剩余节点上换成新 Pod。社区项目 karmada 甚至能跨多个集群扩缩应用。</p>
 
 <h2 id="state">一切围绕「状态」</h2>

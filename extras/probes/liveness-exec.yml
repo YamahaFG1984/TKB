@@ -1,0 +1,17 @@
+# Liveness probe demo: the "app" breaks itself after 30 seconds.
+# The kubelet notices (cat fails) and restarts the container. Watch RESTARTS grow.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: liveness-exec
+spec:
+  containers:
+  - name: ctr
+    image: busybox:1.36
+    command: ["sh", "-c", "touch /tmp/healthy; sleep 30; rm -f /tmp/healthy; sleep 600"]
+    livenessProbe:
+      exec:
+        command: ["cat", "/tmp/healthy"]
+      initialDelaySeconds: 5
+      periodSeconds: 5
+      failureThreshold: 3

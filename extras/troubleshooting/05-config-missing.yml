@@ -1,0 +1,19 @@
+# Broken on purpose: references a ConfigMap that does not exist.
+# Symptom: CreateContainerConfigError.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: tb-config
+  labels:
+    chapter: troubleshooting
+spec:
+  containers:
+  - name: ctr
+    image: busybox:1.36
+    command: ["sh", "-c", "echo LOG_LEVEL=$LOG_LEVEL; sleep 3600"]
+    env:
+    - name: LOG_LEVEL
+      valueFrom:
+        configMapKeyRef:
+          name: app-config
+          key: log-level
