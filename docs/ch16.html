@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 16 章 · 真实世界的安全实践 — Kubernetes 入门实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="16">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 16 章</span>
+<h1>真实世界的 Kubernetes 安全</h1>
+<p class="lede">
+  上一章用 STRIDE 做了威胁建模。这一章站在<strong>安全架构师</strong>的高度，看看在真实环境中落地 Kubernetes 时会遇到哪些安全挑战。
+  它不是照着做的菜谱，而是一张帮你思考的地图：软件交付流水线、工作负载隔离、身份与访问管理、安全监控与审计。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>保护从开发者笔记本到生产服务器的软件供应链：镜像仓库、基础镜像、漏洞扫描、镜像签名</li>
+    <li>理解集群级、节点级、运行时级和网络级的工作负载隔离选项</li>
+    <li>把 Kubernetes 接入企业 IAM，管好 SSH 和高权限账号</li>
+    <li>建立审计、监控和告警，知道迁移现有应用时的安全策略</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="pipeline">软件交付流水线的安全</h2>
+
+<p>容器革新了构建、分发和运行应用的方式，但也让运行危险代码变得前所未有地容易。我们来看看如何保护把代码从开发者笔记本送到生产服务器的这条<strong>供应链</strong>。</p>
+
+<h3>镜像仓库</h3>
+
+<p>镜像存放在公共或私有的镜像仓库（registry）中，仓库又分成多个存储库（repository）。公共仓库在互联网上，推拉镜像最方便，但要格外小心：</p>
+<ol>
+  <li>你需要妥善保护存放在公共仓库上的镜像；</li>
+  <li>你<strong>不应该信任</strong>从公共仓库拉下来的镜像。</li>
+</ol>
+
+<div class="vs">
+  <div class="new">
+    <div class="h">官方镜像（official）</div>
+    <div style="padding:8px 16px;font-size:14.5px">通常由产品厂商提供，经过严格审核，应当遵循良好实践、定期扫描漏洞、包含最新补丁，有的甚至有厂商或仓库方支持。一般更安全，但仍要做尽职调查。</div>
+  </div>
+  <div class="old">
+    <div class="h">社区镜像（community）</div>
+    <div style="padding:8px 16px;font-size:14.5px">没有经过严格审核，使用时要极其谨慎。</div>
+  </div>
+</div>
+
+<p>所以应该为开发者提供一套<strong>标准化</strong>的获取和使用镜像的方式，并让流程尽可能顺畅，免得开发者想绕过它。</p>
+
+<h3>使用经过批准的基础镜像</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="镜像分层以及基于批准的基础镜像构建应用">
+  <text class="ttl" x="150" y="22" text-anchor="middle">镜像分层（简化）</text>
+  <rect class="bx-g" x="40" y="36" width="220" height="44" rx="8"/><text class="lbl on-g" x="150" y="63" text-anchor="middle">你的应用</text>
+  <rect class="bx-b" x="40" y="86" width="220" height="44" rx="8"/><text class="lbl on-b" x="150" y="113" text-anchor="middle">库和依赖</text>
+  <rect class="bx-a" x="40" y="136" width="220" height="44" rx="8"/><text class="lbl on-a" x="150" y="163" text-anchor="middle">基础层：核心 OS 和文件系统</text>
+  <text class="sm" x="150" y="208" text-anchor="middle">三层合起来就是镜像，</text>
+  <text class="sm" x="150" y="226" text-anchor="middle">包含运行应用所需的一切</text>
+
+  <text class="ttl" x="540" y="22" text-anchor="middle">三个应用、两个批准的基础镜像</text>
+  <rect class="bx-g" x="320" y="40" width="120" height="44" rx="8"/><text class="sm on-g" x="380" y="67" text-anchor="middle">应用 A</text>
+  <rect class="bx-g" x="480" y="40" width="120" height="44" rx="8"/><text class="sm on-g" x="540" y="67" text-anchor="middle">Web 应用 B</text>
+  <rect class="bx-g" x="620" y="40" width="120" height="44" rx="8"/><text class="sm on-g" x="680" y="67" text-anchor="middle">Web 应用 C</text>
+  <rect class="bx-a" x="320" y="126" width="120" height="54" rx="8"/><text class="sm on-a" x="380" y="150" text-anchor="middle">批准的</text><text class="sm" x="380" y="168" text-anchor="middle">Alpine</text>
+  <rect class="bx-a" x="480" y="126" width="260" height="54" rx="8"/><text class="sm on-a" x="610" y="150" text-anchor="middle">批准的</text><text class="sm" x="610" y="168" text-anchor="middle">Alpine + NGINX</text>
+  <path class="ln" d="M380 86 V122" marker-end="url(#ar)"/>
+  <path class="ln" d="M540 86 V122" marker-end="url(#ar)"/>
+  <path class="ln" d="M680 86 V122" marker-end="url(#ar)"/>
+  <text class="sm" x="530" y="208" text-anchor="middle">基于官方镜像，按公司策略加固：</text>
+  <text class="sm" x="530" y="226" text-anchor="middle">补丁、驱动、审计设置……</text>
+</svg>
+<figcaption>图 16-1　维护少量经过批准的基础镜像</figcaption>
+</figure>
+
+<p>前期需要投入精力，但回报很多：</p>
+<div class="cards">
+  <div class="card"><h4>标准化</h4><p>一套标准的驱动、已知的补丁、统一的审计设置。</p></div>
+  <div class="card"><h4>减少蔓延</h4><p>非官方的基础镜像更少，支持合同和供应商也可能更少。</p></div>
+  <div class="card"><h4>简化测试和更新</h4><p>只需针对少量已知基础镜像测试和打补丁。</p></div>
+  <div class="card"><h4>简化排错</h4><p>基础镜像数量有限且众所周知；开发者可以专注应用，不用操心 OS。</p></div>
+</div>
+
+<p>
+  确实有特殊需求时，需要有良好的流程：弄清为什么现有批准镜像不能用；评估能否（以及是否值得）更新现有镜像来满足需求；评估引入全新镜像对支持的影响。
+  大多数情况下，应该<strong>更新现有基础镜像</strong>（比如加一个 GPU 驱动），而不是引入全新的镜像。
+</p>
+
+<h3>控制对镜像的访问</h3>
+<ul>
+  <li>安全又实用的做法：在自己的防火墙内托管<strong>私有镜像仓库</strong>，自己控制部署、复制和打补丁方式，按组织需要设计存储库和策略，并对接 Active Directory 等现有身份系统；</li>
+  <li>做不到的话，可以把镜像放在公共仓库的私有存储库里，但要认真挑选服务商并正确配置；</li>
+  <li>只托管经过信息安全团队审核、来源可信的批准镜像，并给存储库加访问控制；</li>
+  <li>限制哪些集群节点能上互联网（镜像仓库可能就在互联网上）；如果要用公共仓库，把节点的互联网访问限制在仓库使用的地址和端口；</li>
+  <li>在仓库上实施严格的 RBAC：例如开发者只能推拉 dev 和 test 存储库，运维团队才能推拉 production 存储库；甚至只允许构建节点或自动化构建系统推送到特定存储库。</li>
+</ul>
+
+<h3>把镜像从非生产推广到生产</h3>
+
+<p>开发环境规则少，开发者可以在里面实验，可能会用到最终想带进生产的非标准镜像。以下措施确保只有安全的镜像被批准进入生产：</p>
+
+<h4>漏洞扫描</h4>
+<p>
+  排在首位的是<strong>漏洞扫描</strong>：在二进制层面扫描镜像，与已知漏洞（CVE）数据库比对。应该把它集成进 CI/CD 流水线，
+  并设定策略：包含某类漏洞（比如严重级别）的镜像自动构建失败并被隔离。好的扫描工具还允许高度定制策略——
+  比如某个 Python 方法在 Common Name 含大量通配符时有 DoS 风险，但如果你根本不这么用，就希望把它标记为误报，而不是所有工具都支持这样做。
+</p>
+
+<h4>配置即代码也要审查</h4>
+<p>
+  扫描应用代码已被广泛接受，但扫描 Dockerfile、Kubernetes YAML、Helm chart 等配置文件的做法还不够普及。
+  一个广为人知的教训：IBM 的一个数据科学实验把<strong>TLS 私钥嵌进了容器镜像</strong>，攻击者拉取镜像后就能获得托管容器节点的 root 权限。
+  如果当初对 Dockerfile 做一次安全审查，这完全可以避免。如今已有越来越多实现「策略即代码」的工具能自动化这类检查。
+</p>
+
+<h4>镜像签名</h4>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="开发者签名镜像，使用者拉取运行时验证签名">
+  <rect class="bx-b" x="20" y="60" width="150" height="70" rx="12"/>
+  <text class="ttl on-b" x="95" y="88" text-anchor="middle">开发者 / 构建</text>
+  <text class="sm" x="95" y="110" text-anchor="middle">用私钥签名镜像</text>
+  <rect class="bx-a" x="300" y="60" width="160" height="70" rx="12"/>
+  <text class="ttl on-a" x="380" y="88" text-anchor="middle">镜像仓库</text>
+  <text class="sm" x="380" y="110" text-anchor="middle">镜像 + 签名</text>
+  <rect class="bx-g" x="590" y="60" width="150" height="70" rx="12"/>
+  <text class="ttl on-g" x="665" y="88" text-anchor="middle">集群 / 运行时</text>
+  <text class="sm" x="665" y="110" text-anchor="middle">拉取时验证签名</text>
+  <path class="ln" d="M172 95 H296" marker-end="url(#ar)"/>
+  <text class="sm" x="234" y="86" text-anchor="middle">push</text>
+  <path class="ln" d="M462 95 H586" marker-end="url(#ar)"/>
+  <text class="sm" x="524" y="86" text-anchor="middle">pull</text>
+  <text class="sm on-g" x="740" y="156" text-anchor="end">✓ 签名有效：是正确的镜像，未被篡改</text>
+  <text class="sm on-r" x="740" y="176" text-anchor="end">✗ 签名无效：拒绝运行</text>
+  <text class="sm" x="235" y="160" text-anchor="middle">用工具定义并强制执行企业级签名策略，</text>
+  <text class="sm" x="235" y="178" text-anchor="middle">不要把它留给个人自觉</text>
+</svg>
+<figcaption>图 16-2　签名与验证通常由容器运行时实现</figcaption>
+</figure>
+
+<h4>镜像推广工作流</h4>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="镜像从构建到生产的推广流程">
+  <rect class="bx" x="20" y="40" width="110" height="60" rx="10"/>
+  <text class="lbl" x="75" y="66" text-anchor="middle">基于批准的</text><text class="lbl" x="75" y="84" text-anchor="middle">基础镜像构建</text>
+  <rect class="bx-p" x="160" y="40" width="110" height="60" rx="10"/>
+  <text class="lbl on-p" x="215" y="66" text-anchor="middle">审查扫描</text><text class="lbl on-p" x="215" y="84" text-anchor="middle">IaC 配置文件</text>
+  <rect class="bx-a" x="300" y="40" width="110" height="60" rx="10"/>
+  <text class="lbl on-a" x="355" y="66" text-anchor="middle">漏洞扫描</text><text class="lbl on-a" x="355" y="84" text-anchor="middle">（CVE）</text>
+  <rect class="bx-b" x="440" y="40" width="110" height="60" rx="10"/>
+  <text class="lbl on-b" x="495" y="66" text-anchor="middle">签名后推送到</text><text class="sm" x="495" y="84" text-anchor="middle">RBAC 保护的仓库</text>
+  <rect class="bx-g" x="580" y="40" width="160" height="60" rx="10"/>
+  <text class="lbl on-g" x="660" y="66" text-anchor="middle">推广到生产</text><text class="sm" x="660" y="84" text-anchor="middle">强制只运行已签名镜像</text>
+  <path class="ln" d="M132 70 H156" marker-end="url(#ar)"/>
+  <path class="ln" d="M272 70 H296" marker-end="url(#ar)"/>
+  <path class="ln" d="M412 70 H436" marker-end="url(#ar)"/>
+  <path class="ln" d="M552 70 H576" marker-end="url(#ar)"/>
+  <rect class="bx-r" x="300" y="140" width="110" height="46" rx="10"/>
+  <text class="sm on-r" x="355" y="168" text-anchor="middle">隔离 / 构建失败</text>
+  <path class="ln-r" d="M355 102 V136" marker-end="url(#ar-r)"/>
+  <text class="sm on-r" x="370" y="124">不合格</text>
+  <text class="sm" x="590" y="160" text-anchor="middle">全程配合网络规则：</text>
+  <text class="sm" x="590" y="178" text-anchor="middle">限制哪些节点能推送和拉取镜像</text>
+</svg>
+<figcaption>图 16-3　构建流水线应尽可能包含的检查（不代表唯一的精确流程）</figcaption>
+</figure>
+
+<h2 id="isolation">工作负载隔离</h2>
+
+<p>从集群级开始，到运行时级，再到集群外的网络防火墙，逐层来看。</p>
+
+<h3>集群级隔离</h3>
+
+<div class="box warn">
+  <div class="t">&#9888; 开门见山</div>
+  <p>Kubernetes <strong>不支持安全的多租户集群</strong>。隔离两个工作负载的唯一方法，是让它们运行在各自的集群、各自的硬件上。</p>
+</div>
+
+<p>
+  划分集群的唯一手段是 Namespace，但它只是一种对资源分组、施加限制（limits）、配额（quotas）和 RBAC 规则的方式，
+  并不能阻止一个 Namespace 里被攻破的工作负载影响其他 Namespace。所以<strong>永远不要在同一个集群上运行敌对的工作负载</strong>。
+  Namespace 很有用，应该用——只是别把它当作安全边界。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="软多租户与硬多租户的选择">
+  <rect class="bx-a" x="20" y="14" width="350" height="200" rx="14"/>
+  <text class="ttl on-a" x="195" y="40" text-anchor="middle">软多租户：可信的工作负载</text>
+  <text class="sm" x="195" y="62" text-anchor="middle">→ 一个集群 + 多个 Namespace</text>
+  <rect class="bx" x="40" y="80" width="310" height="80" rx="10"/>
+  <rect class="bx-b" x="56" y="96" width="135" height="48" rx="8"/><text class="sm" x="123" y="116" text-anchor="middle">ns：前端</text><text class="sm" x="123" y="134" text-anchor="middle">Web 服务</text>
+  <rect class="bx-g" x="200" y="96" width="135" height="48" rx="8"/><text class="sm" x="267" y="116" text-anchor="middle">ns：后端</text><text class="sm" x="267" y="134" text-anchor="middle">推荐服务</text>
+  <text class="sm" x="195" y="186" text-anchor="middle">同一电商应用的不同部分，不同团队管理</text>
+  <text class="sm" x="195" y="204" text-anchor="middle">彼此不敌对</text>
+
+  <rect class="bx-g" x="390" y="14" width="350" height="200" rx="14"/>
+  <text class="ttl on-g" x="565" y="40" text-anchor="middle">硬多租户：不可信 / 可能敌对</text>
+  <text class="sm" x="565" y="62" text-anchor="middle">→ 各自独立的集群</text>
+  <rect class="bx" x="410" y="80" width="100" height="80" rx="10"/><text class="sm" x="460" y="116" text-anchor="middle">生产</text><text class="sm" x="460" y="134" text-anchor="middle">集群</text>
+  <rect class="bx" x="515" y="80" width="100" height="80" rx="10"/><text class="sm" x="565" y="116" text-anchor="middle">客户 A</text><text class="sm" x="565" y="134" text-anchor="middle">集群</text>
+  <rect class="bx" x="620" y="80" width="100" height="80" rx="10"/><text class="sm" x="670" y="116" text-anchor="middle">敏感项目</text><text class="sm" x="670" y="134" text-anchor="middle">集群</text>
+  <text class="sm" x="565" y="186" text-anchor="middle">隔离生产与非生产、不同客户、</text>
+  <text class="sm" x="565" y="204" text-anchor="middle">敏感项目与业务职能</text>
+</svg>
+<figcaption>图 16-4　Kubernetes 的多租户工作组正在研究更好的硬多租户方案</figcaption>
+</figure>
+
+<h3>节点隔离</h3>
+<p>
+  有些应用需要非标准的权限，比如以 root 运行或执行非标准的系统调用。为它们单独建集群可能小题大做，但可以把它们圈在一小部分<strong>专用工作节点</strong>上，
+  让被攻破的工作负载只能影响同一节点上的其他工作负载。同时贯彻纵深防御：在这些节点上开启更严格的审计日志和运行时防护。
+  可以用标签、亲和性/反亲和性规则和污点（taint）把工作负载定向到特定节点。
+</p>
+
+<h3>运行时隔离</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 260" role="img" aria-label="命名空间容器、虚拟机与沙箱运行时的隔离强度">
+  <rect class="bx-r" x="20" y="14" width="230" height="226" rx="14"/>
+  <text class="ttl on-r" x="135" y="40" text-anchor="middle">命名空间容器</text>
+  <rect class="bx" x="36" y="56" width="62" height="36" rx="6"/><text class="sm" x="67" y="78" text-anchor="middle">容器</text>
+  <rect class="bx" x="104" y="56" width="62" height="36" rx="6"/><text class="sm" x="135" y="78" text-anchor="middle">容器</text>
+  <rect class="bx" x="172" y="56" width="62" height="36" rx="6"/><text class="sm" x="203" y="78" text-anchor="middle">容器</text>
+  <rect class="bx-r" x="36" y="102" width="198" height="34" rx="6"/><text class="sm on-r" x="135" y="124" text-anchor="middle">共享宿主机内核</text>
+  <text class="sm" x="135" y="164" text-anchor="middle">靠 namespace、cgroup 隔离</text>
+  <text class="sm" x="135" y="184" text-anchor="middle">——它们从来不是强安全边界</text>
+  <text class="sm" x="135" y="208" text-anchor="middle">Docker、containerd、CRI-O</text>
+  <text class="sm on-g" x="135" y="228" text-anchor="middle">快、轻，需要额外加固</text>
+
+  <rect class="bx-a" x="265" y="14" width="230" height="226" rx="14"/>
+  <text class="ttl on-a" x="380" y="40" text-anchor="middle">沙箱运行时</text>
+  <rect class="bx" x="281" y="56" width="95" height="36" rx="6"/><text class="sm" x="328" y="78" text-anchor="middle">容器</text>
+  <rect class="bx" x="384" y="56" width="95" height="36" rx="6"/><text class="sm" x="431" y="78" text-anchor="middle">容器</text>
+  <rect class="bx-a" x="281" y="102" width="198" height="34" rx="6"/><text class="sm on-a" x="380" y="124" text-anchor="middle">gVisor / Kata Containers</text>
+  <text class="sm" x="380" y="164" text-anchor="middle">通过 CRI 和 RuntimeClass</text>
+  <text class="sm" x="380" y="184" text-anchor="middle">轻松接入 Kubernetes</text>
+  <text class="sm" x="380" y="208" text-anchor="middle">只把需要强隔离的工作负载</text>
+  <text class="sm" x="380" y="228" text-anchor="middle">调度到这类运行时</text>
+
+  <rect class="bx-g" x="510" y="14" width="230" height="226" rx="14"/>
+  <text class="ttl on-g" x="625" y="40" text-anchor="middle">虚拟机</text>
+  <rect class="bx" x="526" y="56" width="95" height="80" rx="6"/><text class="sm" x="573" y="84" text-anchor="middle">工作负载</text><text class="sm on-g" x="573" y="110" text-anchor="middle">专属内核</text>
+  <rect class="bx" x="629" y="56" width="95" height="80" rx="6"/><text class="sm" x="676" y="84" text-anchor="middle">工作负载</text><text class="sm on-g" x="676" y="110" text-anchor="middle">专属内核</text>
+  <text class="sm" x="625" y="164" text-anchor="middle">硬件强制隔离</text>
+  <text class="sm" x="625" y="184" text-anchor="middle">隔离性最好</text>
+  <text class="sm on-r" x="625" y="208" text-anchor="middle">相对慢、耗资源</text>
+  <path class="ln" d="M20 252 H740" marker-end="url(#ar)"/>
+</svg>
+<figcaption>图 16-5　越往右隔离越强，开销也越大</figcaption>
+</figure>
+
+<p>
+  谈到工作负载隔离，赢家永远是虚拟机。但如今给容器加上 AppArmor、SELinux、seccomp、capabilities、用户命名空间等安全技术比以往容易得多，
+  大多数运行时和托管服务都提供了合理的默认配置（不过排错时仍可能很复杂）。可选的隔离方案汇总如下：
+</p>
+
+<div class="tw">
+<table>
+  <tr><th>方案</th><th>特点</th></tr>
+  <tr><td>虚拟机</td><td>每个工作负载有专属内核，隔离极好，但相对慢、耗资源</td></tr>
+  <tr><td>命名空间容器</td><td>共享宿主机内核，快而轻，但需要额外工作来增强隔离</td></tr>
+  <tr><td>每个容器跑在自己的虚拟机里</td><td>试图兼得容器的灵活和 VM 的安全，但即使用轻量 VM 也失去了容器的大部分吸引力，不太流行</td></tr>
+  <tr><td>不同的 RuntimeClass</td><td>全部以容器运行，把需要强隔离的工作负载调度到合适的运行时</td></tr>
+  <tr><td>Wasm 容器</td><td>把 Wasm 应用打包进 OCI 容器，容器只用于打包和调度，运行时在默认拒绝的安全 Wasm 宿主中执行</td></tr>
+</table>
+</div>
+
+<h3>网络隔离</h3>
+
+<p>
+  防火墙是分层安全体系不可或缺的一环，目标是只放行经过授权的通信。Pod 网络由 CNI 插件实现，大体分两类：<strong>覆盖网络（overlay）</strong>和 <strong>BGP</strong>，它们对防火墙的影响很不一样。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 270" role="img" aria-label="覆盖网络封装数据包与 BGP 不封装的对比">
+  <rect class="bx-a" x="20" y="14" width="350" height="242" rx="14"/>
+  <text class="ttl on-a" x="195" y="40" text-anchor="middle">覆盖网络（VXLAN）</text>
+  <text class="sm" x="195" y="62" text-anchor="middle">在三层网络上虚拟出一个扁平的二层网络</text>
+  <rect class="bx" x="50" y="80" width="290" height="96" rx="10"/>
+  <text class="sm" x="66" y="100">外层包头：节点 IP 192.168.1.5 → 192.168.2.8</text>
+  <rect class="bx-g" x="66" y="112" width="258" height="50" rx="8"/>
+  <text class="sm" x="195" y="132" text-anchor="middle">内层包头：Pod IP 10.1.0.4 → 10.1.3.7</text>
+  <text class="sm" x="195" y="150" text-anchor="middle">+ 数据</text>
+  <text class="sm on-r" x="195" y="204" text-anchor="middle">原始源/目的 IP 被封装隐藏</text>
+  <text class="sm" x="195" y="224" text-anchor="middle">防火墙得能拆包检查内容</text>
+  <text class="sm" x="195" y="242" text-anchor="middle">才能做出有用的决定</text>
+
+  <rect class="bx-g" x="390" y="14" width="350" height="242" rx="14"/>
+  <text class="ttl on-g" x="565" y="40" text-anchor="middle">BGP</text>
+  <text class="sm" x="565" y="62" text-anchor="middle">通过对等体互相分享路由，驱动互联网的协议</text>
+  <rect class="bx" x="420" y="80" width="290" height="96" rx="10"/>
+  <rect class="bx-g" x="436" y="104" width="258" height="50" rx="8"/>
+  <text class="sm" x="565" y="124" text-anchor="middle">包头：Pod IP 10.1.0.4 → 10.1.3.7</text>
+  <text class="sm" x="565" y="142" text-anchor="middle">+ 数据（不封装）</text>
+  <text class="sm on-g" x="565" y="204" text-anchor="middle">没有封装，防火墙看得清清楚楚</text>
+  <text class="sm" x="565" y="224" text-anchor="middle">如果你的防火墙不能检查封装包，</text>
+  <text class="sm" x="565" y="242" text-anchor="middle">可以考虑 BGP 类型的 Pod 网络</text>
+</svg>
+<figcaption>图 16-6　封装让防火墙「看不清」</figcaption>
+</figure>
+
+<div class="box note">
+  <div class="t">&#9993; BGP 的比喻</div>
+  <p>
+    你想给失联的老朋友寄生日贺卡，但不知道地址。你孩子的同学的父母还和这位朋友有联系。于是你把卡片交给孩子，孩子交给同学，同学交给父母，父母再转交给你的朋友。
+    BGP 路由就是这样通过一个互相帮忙找路的对等网络完成的。
+  </p>
+</div>
+
+<ul>
+  <li><strong>物理防火墙</strong>是专用网络硬件，通常由中心团队管理；<strong>主机防火墙</strong>是操作系统功能，通常由管理 OS 的团队负责。两者结合往往最安全，但如果物理防火墙的变更流程漫长复杂，可能跟不上 Kubernetes 的节奏。</li>
+  <li><strong>抓包</strong>：Pod IP 不仅可能被封装隐藏，还是动态的、会被回收复用（IP churn），单凭 IP 很难识别工作负载。抓包时能把 IP 关联到 Pod ID、Service 别名、容器 ID 等 Kubernetes 标识会非常有用。</li>
+</ul>
+
+<h2 id="iam">身份与访问管理（IAM）</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="Kubernetes 复用企业 IAM 管理用户生命周期">
+  <rect class="bx" x="20" y="60" width="140" height="70" rx="12"/>
+  <text class="ttl" x="90" y="88" text-anchor="middle">HR 系统</text>
+  <text class="sm" x="90" y="110" text-anchor="middle">入职 / 离职</text>
+  <rect class="bx-p" x="220" y="50" width="200" height="90" rx="12"/>
+  <text class="ttl on-p" x="320" y="76" text-anchor="middle">企业 IAM</text>
+  <text class="sm" x="320" y="98" text-anchor="middle">Active Directory / LDAP</text>
+  <text class="sm" x="320" y="118" text-anchor="middle">云 IAM · 用户组</text>
+  <rect class="bx-b" x="480" y="50" width="260" height="90" rx="12"/>
+  <text class="ttl on-b" x="610" y="76" text-anchor="middle">Kubernetes RBAC</text>
+  <text class="sm" x="610" y="98" text-anchor="middle">按组授权（v1.8 起稳定）</text>
+  <text class="sm" x="610" y="118" text-anchor="middle">入职自动有权限，离职自动失效</text>
+  <path class="ln" d="M162 95 H216" marker-end="url(#ar)"/>
+  <path class="ln" d="M422 95 H476" marker-end="url(#ar)"/>
+  <text class="sm" x="380" y="176" text-anchor="middle">Kubernetes 不自建用户库，而是复用企业已有的身份系统</text>
+</svg>
+<figcaption>图 16-7　员工生命周期自动反映到集群权限</figcaption>
+</figure>
+
+<h3>管理对集群节点的 SSH 访问</h3>
+<p>几乎所有 Kubernetes 管理都通过对 API 服务器的 REST 调用完成，用户很少需要 SSH 到节点。SSH 只应用于：</p>
+<ul>
+  <li>无法通过 Kubernetes API 完成的节点管理工作；</li>
+  <li>「打碎玻璃」式的紧急操作，比如 API 服务器宕机；</li>
+  <li>深度排错。</li>
+</ul>
+
+<h3>多因素认证（MFA）</h3>
+<p>
+  能力越大，责任越大。拥有 API 服务器 root 权限和集群节点 root 权限的账号极其强大，是攻击者和心怀不满的员工的首要目标，应该用 MFA 保护：
+  第一步验证你<strong>知道</strong>的（用户名和密码），第二步验证你<strong>拥有</strong>的（比如一次性密码）。装了 kubectl 的工作站和用户配置文件也要保护好。
+</p>
+
+<h2 id="monitoring">安全监控与审计</h2>
+
+<p>没有系统是 100% 安全的，你应该始终为被入侵做好准备。入侵发生时，至少要能做到两件事：</p>
+<ol>
+  <li><strong>发现</strong>入侵已经发生；</li>
+  <li>构建一条详细的、<strong>不可抵赖</strong>的事件时间线，回答发生了什么、如何发生、何时发生、是谁干的——极端情况下这些信息会被呈上法庭。</li>
+</ol>
+<p>好的审计和监控还能帮你发现安全体系的薄弱点。没有健全的审计和监控，不要上线生产。</p>
+
+<div class="cards">
+  <div class="card"><span class="ic">&#9989;</span><h4>基线最佳实践</h4><p>CIS 发布了 Kubernetes 安全基准，Aqua Security 的 <strong>kube-bench</strong> 可以对集群运行 CIS 检查并生成报告（无法检查托管服务的控制平面）。可在节点供应流程中运行，不合格就失败；也可作为事后对比的基线。</p></div>
+  <div class="card"><span class="ic">&#9851;</span><h4>容器与 Pod 生命周期事件</h4><p>Pod 来来去去，要配置日志保留，让已终止 Pod 的日志事后仍可查看。运行时也可能保留容器生命周期日志。</p></div>
+  <div class="card"><span class="ic">&#128248;</span><h4>取证检查点</h4><p><strong>CRIU</strong>（用户空间检查点/恢复）能悄悄捕获运行中容器的状态，在沙箱中恢复深入分析。撰写时在 Kubernetes 中是 alpha，只有 CRI-O 支持。</p></div>
+  <div class="card"><span class="ic">&#128221;</span><h4>应用日志</h4><p>有的应用写到 stdout/stderr，日志工具能和容器日志一起采集；有的写到自定义位置的专有日志文件里。逐个应用调查清楚，别漏掉。</p></div>
+  <div class="card"><span class="ic">&#128100;</span><h4>用户操作</h4><p>API 服务器请求都应记录。攻击者也可能 SSH 到控制平面直接操作对象甚至 etcd：限制 SSH、加 MFA、记录所有 SSH 活动并发送到安全的日志聚合器，甚至要求两名合格人员同时在场。</p></div>
+  <div class="card"><span class="ic">&#128202;</span><h4>管理日志数据</h4><p>容器带来高应用密度，也带来海量日志和审计数据。需要专门的工具来存储、做主动分析和事后分析。</p></div>
+</div>
+
+<h3>值得立即告警的安全事件</h3>
+
+<div class="tw">
+<table>
+  <tr><th>事件</th><th>为什么要警惕</th></tr>
+  <tr><td><strong>人类用户创建特权 Pod</strong></td><td>特权 Pod 往往能获得节点 root 权限，通常有策略禁止。极少数确实需要时，一般由使用 ServiceAccount 的自动化流程创建。</td></tr>
+  <tr><td><strong>人类用户发起 exec 会话</strong></td><td>exec 提供类似 shell 的容器访问，通常只用于排错。非排错目的的 exec 要调查，并考虑删除相关容器以防篡改。</td></tr>
+  <tr><td><strong>从互联网访问集群</strong></td><td>通常禁止从互联网访问控制平面。要监控成功和失败的尝试——成功往往意味着有需要修复的错误配置。</td></tr>
+</table>
+</div>
+
+<h2 id="migrate">把现有应用迁移到 Kubernetes</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="迁移应用的爬走跑三步策略">
+  <rect class="bx-b" x="20" y="30" width="220" height="140" rx="14"/>
+  <text class="ttl on-b" x="130" y="58" text-anchor="middle">① 爬（Crawl）</text>
+  <text class="sm" x="130" y="88" text-anchor="middle">给现有应用做威胁建模，</text>
+  <text class="sm" x="130" y="108" text-anchor="middle">了解当前的安全状况</text>
+  <text class="sm" x="130" y="136" text-anchor="middle">例：哪些应用用了 TLS，</text>
+  <text class="sm" x="130" y="154" text-anchor="middle">哪些没用</text>
+  <rect class="bx-a" x="270" y="30" width="220" height="140" rx="14"/>
+  <text class="ttl on-a" x="380" y="58" text-anchor="middle">② 走（Walk）</text>
+  <text class="sm" x="380" y="88" text-anchor="middle">迁移时保持安全状况不变</text>
+  <text class="sm" x="380" y="116" text-anchor="middle">例：原来没用 TLS 的，</text>
+  <text class="sm" x="380" y="134" text-anchor="middle">迁移时也先不要改</text>
+  <rect class="bx-g" x="520" y="30" width="220" height="140" rx="14"/>
+  <text class="ttl on-g" x="630" y="58" text-anchor="middle">③ 跑（Run）</text>
+  <text class="sm" x="630" y="88" text-anchor="middle">迁移完成后再逐步加强</text>
+  <text class="sm" x="630" y="108" text-anchor="middle">先非关键应用，后关键应用</text>
+  <text class="sm" x="630" y="136" text-anchor="middle">例：先单向 TLS，</text>
+  <text class="sm" x="630" y="154" text-anchor="middle">最终双向 TLS</text>
+  <path class="ln" d="M242 100 H266" marker-end="url(#ar)"/>
+  <path class="ln" d="M492 100 H516" marker-end="url(#ar)"/>
+  <text class="sm" x="380" y="194" text-anchor="middle">迁移的同时改安全设置，出了问题就分不清是迁移导致的还是安全改动导致的</text>
+</svg>
+<figcaption>图 16-8　不要在迁移的同时改变应用的安全状况</figcaption>
+</figure>
+
+<h2 id="example">真实案例：CVE-2019-5736</h2>
+
+<p>
+  2019 年 2 月披露的 CVE-2019-5736 允许<strong>以 root 运行的容器进程</strong>获得工作节点及其上所有容器的 root 权限。
+  这个漏洞很危险，但本章（和上一章）讲过的这些做法，任何一项都足以阻止它：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 180" role="img" aria-label="三道防线都能阻止 CVE-2019-5736">
+  <rect class="bx-r" x="20" y="50" width="160" height="80" rx="12"/>
+  <text class="ttl on-r" x="100" y="80" text-anchor="middle">CVE-2019-5736</text>
+  <text class="sm" x="100" y="104" text-anchor="middle">容器 root → 节点 root</text>
+  <rect class="bx-g" x="250" y="14" width="200" height="44" rx="10"/>
+  <text class="lbl on-g" x="350" y="41" text-anchor="middle">① 镜像漏洞扫描</text>
+  <rect class="bx-g" x="250" y="68" width="200" height="44" rx="10"/>
+  <text class="lbl on-g" x="350" y="95" text-anchor="middle">② 不以 root 运行进程</text>
+  <rect class="bx-g" x="250" y="122" width="200" height="44" rx="10"/>
+  <text class="lbl on-g" x="350" y="149" text-anchor="middle">③ 启用 SELinux</text>
+  <path class="ln-r" d="M182 80 L246 38" marker-end="url(#ar-r)"/>
+  <path class="ln-r" d="M182 90 H246" marker-end="url(#ar-r)"/>
+  <path class="ln-r" d="M182 100 L246 142" marker-end="url(#ar-r)"/>
+  <text class="sm" x="600" y="36" text-anchor="middle">有 CVE 编号，扫描工具会发现并告警</text>
+  <text class="sm" x="600" y="90" text-anchor="middle">禁止 root 容器的策略让它无从下手</text>
+  <text class="sm" x="600" y="144" text-anchor="middle">标准 SELinux 策略也能阻止利用</text>
+</svg>
+<figcaption>图 16-9　纵深防御：任何一道防线都能挡住它</figcaption>
+</figure>
+
+<h2 id="summary">小结</h2>
+<ul>
+  <li><strong>交付流水线</strong>：保护镜像仓库、使用批准的基础镜像、扫描漏洞、审查配置文件、对镜像签名和验证。</li>
+  <li><strong>工作负载隔离</strong>：Namespace 不是安全边界；强隔离要独立集群；还可以用节点隔离、沙箱运行时、虚拟机；注意覆盖网络对防火墙的影响。</li>
+  <li><strong>IAM</strong>：接入企业身份系统，限制 SSH，为高权限账号启用 MFA。</li>
+  <li><strong>监控与审计</strong>：没有它们不要上线；对特权 Pod、人工 exec、来自互联网的访问等事件立即告警。</li>
+  <li>迁移现有应用时遵循「爬、走、跑」：先迁移，再加固。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>挑一个你常用的公共镜像，用 Trivy 或 Docker Scout 之类的工具扫描它，看看有多少已知漏洞、其中几个是严重级别。</li>
+    <li>在测试集群上运行 kube-bench（<code>github.com/aquasecurity/kube-bench</code>），挑三条失败项研究原因和修复方法。</li>
+    <li>回顾第 5 章的 shield 和 hydra：如果它们属于两个互不信任的客户，你会如何重新设计部署架构？</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

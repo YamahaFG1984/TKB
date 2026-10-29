@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Kubernetes 入门实战 · 从零到生产</title>
+<meta name="description" content="基于《The Kubernetes Book》2026 版整理的中文图解教程：Pod、Deployment、Service、Gateway API、存储、配置、StatefulSet、RBAC、API 与安全。">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="0">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<div class="hero">
+  <span class="chapter-eyebrow">面向初学者的 16 章图解教程</span>
+  <h1>Kubernetes 入门实战</h1>
+  <p class="sub">
+    这套教程依据 Nigel Poulton 的《The Kubernetes Book》2026 版和配套示例仓库整理而成。
+    每一章都从「为什么需要它」讲起，配上大量示意图，再用仓库里真实的 YAML 文件一步步动手——
+    从第一个 Pod，到 Gateway API、StatefulSet、RBAC，再到生产环境的安全实践。
+  </p>
+  <p style="margin-top:14px">
+    <span class="pill">Kubernetes 1.35</span><span class="pill">kubectl</span><span class="pill">Pod</span>
+    <span class="pill">Deployment</span><span class="pill">Service</span><span class="pill">Gateway API</span>
+    <span class="pill">PV / PVC / StorageClass</span><span class="pill">ConfigMap / Secret</span>
+    <span class="pill">StatefulSet</span><span class="pill">RBAC</span><span class="pill">CRD</span><span class="pill">PSA</span>
+  </p>
+</div>
+
+<h2 id="what">Kubernetes 是什么</h2>
+
+<p>
+  一句话：<strong>Kubernetes 是一个编排器</strong>。你告诉它「我想要什么」——比如「这个应用要 10 个副本，对外开 8080 端口」，
+  它就负责把应用部署到一群机器上，坏了自动修，忙了自动扩，要升级就一个个平滑替换。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 260" role="img" aria-label="Kubernetes 的核心思想：声明期望状态，控制器持续调和">
+  <rect class="bx" x="20" y="90" width="160" height="80" rx="12"/>
+  <text class="ttl" x="100" y="118" text-anchor="middle">你</text>
+  <text class="mono sm" x="100" y="142" text-anchor="middle">app.yml</text>
+  <text class="sm" x="100" y="160" text-anchor="middle">replicas: 10</text>
+
+  <rect class="bx-a" x="250" y="60" width="260" height="140" rx="70"/>
+  <text class="ttl on-a" x="380" y="104" text-anchor="middle">Kubernetes 控制平面</text>
+  <text class="sm" x="380" y="130" text-anchor="middle">期望状态 vs 观测状态</text>
+  <text class="sm" x="380" y="150" text-anchor="middle">不一致？立刻调和</text>
+  <text class="sm" x="380" y="170" text-anchor="middle">永不停歇</text>
+
+  <rect class="bx-g" x="580" y="30" width="160" height="56" rx="10"/>
+  <text class="lbl on-g" x="660" y="62" text-anchor="middle">部署与自愈</text>
+  <rect class="bx-g" x="580" y="102" width="160" height="56" rx="10"/>
+  <text class="lbl on-g" x="660" y="134" text-anchor="middle">扩容与缩容</text>
+  <rect class="bx-g" x="580" y="174" width="160" height="56" rx="10"/>
+  <text class="lbl on-g" x="660" y="206" text-anchor="middle">滚动更新与回滚</text>
+
+  <path class="ln" d="M182 130 H246" marker-end="url(#ar)"/>
+  <text class="mono sm" x="214" y="120" text-anchor="middle">apply</text>
+  <path class="ln-g" d="M512 110 L576 60" marker-end="url(#ar-g)"/>
+  <path class="ln-g" d="M512 130 H576" marker-end="url(#ar-g)"/>
+  <path class="ln-g" d="M512 150 L576 200" marker-end="url(#ar-g)"/>
+</svg>
+<figcaption>图 0-1　声明你想要的，Kubernetes 负责实现并一直维持它</figcaption>
+</figure>
+
+<div class="cards">
+  <div class="card"><span class="ic">&#9096;</span><h4>云的操作系统</h4><p>就像 Linux 抽象掉一台服务器的硬件，Kubernetes 抽象掉整片云：AWS、Azure、GCP 还是自家机房，用法都一样。</p></div>
+  <div class="card"><span class="ic">&#128230;</span><h4>以容器为单位</h4><p>应用打包成容器，包进 Pod，再交给 Deployment 等控制器管理。</p></div>
+  <div class="card"><span class="ic">&#128221;</span><h4>一切皆 YAML</h4><p>所有配置都是声明式的 YAML 文件，可以放进 Git 做版本管理和审查。</p></div>
+  <div class="card"><span class="ic">&#127760;</span><h4>行业事实标准</h4><p>由 Google 于 2014 年开源，现由 CNCF 管理，已十余岁，每年约 3 个版本。</p></div>
+</div>
+
+<h2 id="who">这套教程写给谁</h2>
+<ul>
+  <li><strong>听说过容器、但没用过 Kubernetes</strong> 的开发者：每个概念都配图解释，术语出现时就地翻译。</li>
+  <li><strong>需要上手运维集群</strong> 的工程师：每章都有可直接运行的命令和真实输出，知道「敲下去会看到什么」。</li>
+  <li><strong>准备系统梳理知识</strong> 的人：从架构原理到安全实践，覆盖原书全部 16 章。</li>
+</ul>
+
+<div class="box note">
+  <div class="t">&#9432; 需要什么前置知识</div>
+  <p>
+    会用命令行（<code>cd</code>、<code>ls</code>、编辑文件）就够了。知道 Docker 和容器是什么会更轻松，但不是必须——第 1 章会从头讲。
+    YAML 的语法很简单：缩进表示层级，<code>-</code> 表示列表项，读几个例子就会了。
+  </p>
+</div>
+
+<h2 id="route">学习路线</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="全书五个部分的学习路线">
+  <rect class="bx-a" x="20" y="20" width="220" height="110" rx="12"/>
+  <text class="ttl on-a" x="130" y="46" text-anchor="middle">第一部分 · 打好基础</text>
+  <text class="sm" x="130" y="72" text-anchor="middle">1 入门　2 工作原理</text>
+  <text class="sm" x="130" y="92" text-anchor="middle">3 搭建环境</text>
+  <text class="sm" x="130" y="116" text-anchor="middle">概念 + 装好集群</text>
+
+  <rect class="bx-b" x="270" y="20" width="220" height="110" rx="12"/>
+  <text class="ttl on-b" x="380" y="46" text-anchor="middle">第二部分 · 核心对象</text>
+  <text class="sm" x="380" y="72" text-anchor="middle">4 Pod　5 Namespace</text>
+  <text class="sm" x="380" y="92" text-anchor="middle">6 Deployment　7 Service</text>
+  <text class="sm" x="380" y="116" text-anchor="middle">每天都要用的四件套</text>
+
+  <rect class="bx-p" x="520" y="20" width="220" height="110" rx="12"/>
+  <text class="ttl on-p" x="630" y="46" text-anchor="middle">第三部分 · 网络</text>
+  <text class="sm" x="630" y="72" text-anchor="middle">8 Gateway API</text>
+  <text class="sm" x="630" y="92" text-anchor="middle">9 服务发现深入</text>
+  <text class="sm" x="630" y="116" text-anchor="middle">流量怎么进来、怎么找到彼此</text>
+
+  <rect class="bx-g" x="145" y="170" width="220" height="110" rx="12"/>
+  <text class="ttl on-g" x="255" y="196" text-anchor="middle">第四部分 · 存储与配置</text>
+  <text class="sm" x="255" y="222" text-anchor="middle">10 存储　11 ConfigMap/Secret</text>
+  <text class="sm" x="255" y="242" text-anchor="middle">12 StatefulSet</text>
+  <text class="sm" x="255" y="266" text-anchor="middle">数据和配置放哪里</text>
+
+  <rect class="bx-r" x="395" y="170" width="220" height="110" rx="12"/>
+  <text class="ttl on-r" x="505" y="196" text-anchor="middle">第五部分 · API 与安全</text>
+  <text class="sm" x="505" y="222" text-anchor="middle">13 RBAC　14 API</text>
+  <text class="sm" x="505" y="242" text-anchor="middle">15 威胁建模　16 安全实践</text>
+  <text class="sm" x="505" y="266" text-anchor="middle">走向生产环境</text>
+
+  <path class="ln-a" d="M242 75 H266" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M492 75 H516" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M630 132 C630 150 300 140 270 166" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M367 225 H391" marker-end="url(#ar-a)"/>
+</svg>
+<figcaption>图 0-2　五个部分，循序渐进</figcaption>
+</figure>
+
+<h2 id="how">怎么用这套教程</h2>
+<ul>
+  <li><strong>按顺序读。</strong>后面的章节会用到前面的概念。第 1、2 章是理论地图，第 3 章装好环境后就一路动手。</li>
+  <li><strong>亲手敲命令。</strong>代码块右上角有「复制」按钮；终端会话里只会复制 <code>$</code> 后面的命令，不会把输出也复制进去。</li>
+  <li><strong>留意彩色提示框。</strong><span style="color:var(--blue)">蓝色</span>是补充说明，<span style="color:var(--green)">绿色</span>是技巧，<span style="color:var(--red)">红色</span>是坑，<span style="color:var(--accent-2)">橙色</span>是必须记住的要点。</li>
+  <li><strong>做每章末尾的练习。</strong>看懂和做出来之间的差距，比你想象的大。</li>
+</ul>
+
+<h2 id="setup">示例代码与环境</h2>
+
+<p>所有 YAML 文件和示例应用都在原书的 GitHub 仓库里（本教程也位于这个仓库的 <code>docs/</code> 目录）：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ git clone https://github.com/nigelpoulton/TKB.git
+$ cd TKB
+$ git fetch origin
+$ git checkout -b 2026 origin/2026
+</pre>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th>环境</th><th>适用章节</th></tr>
+  <tr><td>Docker Desktop 内置的多节点（kind）集群</td><td>除 Gateway API 和存储外的所有示例</td></tr>
+  <tr><td>云上托管集群（原书使用 Akamai LKE）</td><td>第 8 章 Gateway API、第 10 章存储、第 12 章 StatefulSet</td></tr>
+</table>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 写给 Windows 用户</div>
+  <p>
+    大多数命令在 Linux、Mac、Windows 上都能用。书中长命令用反斜杠 <code>\</code> 换行，Windows 上要么去掉反斜杠写成一行，要么换成反引号 <code>`</code>。
+    其他差异会在用到的地方单独说明。
+  </p>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 关于大写</div>
+  <p>
+    和原书一样，本教程把 Kubernetes 对象名的首字母大写，比如 Pod、Service、Namespace。这样你能分辨我们说的是 Kubernetes 的 <strong>LoadBalancer</strong> 对象，还是泛指云上的「负载均衡器」。
+  </p>
+</div>
+
+<h2 id="toc">全部章节</h2>
+<div id="toc-grid"></div>
+
+<div class="box key" style="margin-top:32px">
+  <div class="t">&#9733; 一句话总结</div>
+  <p>
+    如果你只记住一件事：<strong>你用 YAML 声明期望状态，Kubernetes 的控制器永不停歇地把现实调和成你想要的样子。</strong>
+    接下来的 16 章，都是这句话在不同对象上的展开。
+  </p>
+</div>
+
+<p style="margin-top:28px;font-size:13px;color:var(--fg-faint)">
+  内容依据 Nigel Poulton《The Kubernetes Book》2026 版（安全章节的技术内容由 Pushkar Joglekar 贡献）及其示例仓库整理，
+  为便于初学者学习重新组织并绘制了示意图。原书请见 leanpub.com/thekubernetesbook。
+</p>
+
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

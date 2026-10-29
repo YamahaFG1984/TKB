@@ -1,0 +1,1105 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 8 章 · Gateway API — Kubernetes 入门实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="8">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 8 章</span>
+<h1>Gateway API：把外部流量路由进集群</h1>
+<p class="lede">
+  每个应用都开一个 LoadBalancer Service？云负载均衡器很贵，而且它只懂 TCP 端口，不懂 HTTP 路径和主机名。
+  <strong>Gateway API</strong> 是 Kubernetes 原生的解决方案：一个负载均衡器服务多个应用，支持按路径、请求头路由和按权重分流，
+  并且天生适配团队分工。它已经取代 Ingress 成为战略方向。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>知道为什么 Ingress 被淘汰</li>
+    <li>理解 Gateway API 的三大核心资源：<strong>GatewayClass、Gateway、HTTPRoute</strong></li>
+    <li>理解 Gateway 控制器如何「认领」GatewayClass 并部署 Gateway</li>
+    <li>分清控制平面与数据平面、混合数据平面与全托管数据平面</li>
+    <li>理解面向角色的设计，以及如何限制哪些路由能绑定到网关</li>
+    <li>动手完成金丝雀分流（80/20）和跨 Namespace 路由两个实验</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="why">为什么不用 Ingress 了</h2>
+
+<p>
+  Ingress 是 Gateway API 的前身，但它从来不是一个战略性项目，缺乏投入，最终在一堆安全隐患下年久失修。
+  SIG Network 小组和安全响应委员会宣布：最流行的实现 <strong>Ingress NGINX 将在 2026 年 3 月停止所有开发和缺陷修复</strong>。
+  现有部署还能继续工作，但你应该考虑迁移到 Gateway API。用过 Ingress 的话，你会在 Gateway API 里看到很多熟悉的概念。
+</p>
+
+<div class="cards">
+  <div class="card"><span class="ic">&#128269;</span><h4>懂协议</h4><p>已支持 HTTP、HTTPS、gRPC，TCP 和 UDP 正在路上。</p></div>
+  <div class="card"><span class="ic">&#128256;</span><h4>一个入口多个应用</h4><p>一个负载均衡器，按主机名、路径、请求头把流量分给不同应用。</p></div>
+  <div class="card"><span class="ic">&#9878;</span><h4>按权重分流</h4><p>轻松实现金丝雀发布、A/B 测试。</p></div>
+  <div class="card"><span class="ic">&#128101;</span><h4>面向角色</h4><p>资源模型对应组织分工，并支持跨 Namespace 路由的多租户场景。</p></div>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; Gateway API 只是一份规范</div>
+  <p>
+    Kubernetes 本身<strong>没有</strong>默认实现，你需要自己安装一个。好在 Cilium、Envoy、Istio、NGINX、Traefik 等项目都有实现，安装简单，在大多数云和本地环境表现一致。
+    有些云平台会预装自己的实现，但它们是专有的，可能加深云厂商锁定。
+  </p>
+</div>
+
+<h2 id="big-picture">全局视图</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="外部客户端经 Gateway 管理的负载均衡器和 HTTPRoute 到达应用">
+  <rect class="bx" x="20" y="70" width="110" height="60" rx="10"/>
+  <text class="ttl" x="75" y="104" text-anchor="middle">外部客户端</text>
+  <rect class="bx-a" x="170" y="50" width="190" height="100" rx="12"/>
+  <text class="ttl on-a" x="265" y="76" text-anchor="middle">负载均衡器</text>
+  <text class="sm" x="265" y="98" text-anchor="middle">由 Gateway 对象定义</text>
+  <text class="sm" x="265" y="116" text-anchor="middle">（Gateway 管理的 LB）</text>
+  <rect class="bx-p" x="400" y="62" width="150" height="76" rx="12"/>
+  <text class="ttl on-p" x="475" y="90" text-anchor="middle">HTTPRoute</text>
+  <text class="sm" x="475" y="112" text-anchor="middle">/kits → svc-kits</text>
+  <rect class="bx-g" x="590" y="62" width="150" height="76" rx="12"/>
+  <text class="ttl on-g" x="665" y="90" text-anchor="middle">Service → Pod</text>
+  <text class="sm" x="665" y="112" text-anchor="middle">你的应用</text>
+  <path class="ln" d="M132 100 H166" marker-end="url(#ar)"/>
+  <path class="ln" d="M362 100 H396" marker-end="url(#ar)"/>
+  <path class="ln" d="M552 100 H586" marker-end="url(#ar)"/>
+  <text class="sm" x="380" y="184" text-anchor="middle">Gateway 负责「接收流量」，HTTPRoute 负责「决定流量去哪」</text>
+</svg>
+<figcaption>图 8-1　最简单的请求路径</figcaption>
+</figure>
+
+<p>每一个 Gateway API <strong>实现（implementation）</strong>都会安装三样东西：</p>
+
+<ol class="steps">
+  <li><strong>API 资源</strong>：GatewayClass（连接 Gateway 和控制器）、Gateway（创建负载均衡器）、HTTPRoute（添加路由逻辑）等；</li>
+  <li><strong>Gateway 控制器</strong>：监视新的 Gateway 并部署它们；</li>
+  <li><strong>一个或多个 GatewayClass</strong>：把 Gateway 和正确的控制器关联起来。</li>
+</ol>
+
+<p>
+  实现分三个一致性等级：<em>Conformant（完全一致）</em>、<em>Partially conformant（部分一致）</em>和 <em>Stale（过时）</em>。
+  完全一致至少要支持 Gateway 和 HTTPRoute。本章以 Envoy Gateway 和 NGINX Gateway Fabric 为例，但原理和流程适用于所有实现。
+</p>
+
+<h2 id="resources">Gateway API 资源</h2>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl api-resources --api-group=gateway.networking.k8s.io
+NAME                 SHORTNAMES   APIVERSION                           KIND
+gatewayclasses       gc           gateway.networking.k8s.io/v1         GatewayClass
+gateways             gtw          gateway.networking.k8s.io/v1         Gateway
+httproutes                        gateway.networking.k8s.io/v1         HTTPRoute
+backendtlspolicies   btlspolicy   gateway.networking.k8s.io/v1         BackendTLSPolicy
+grpcroutes                        gateway.networking.k8s.io/v1         GRPCRoute
+referencegrants      refgrant     gateway.networking.k8s.io/v1beta1    ReferenceGrant
+tcproutes                         gateway.networking.k8s.io/v1alpha2   TCPRoute
+tlsroutes                         gateway.networking.k8s.io/v1alpha3   TLSRoute
+udproutes                         gateway.networking.k8s.io/v1alpha2   UDPRoute
+</pre>
+</div>
+
+<p>
+  注意 <code>APIVERSION</code> 列：<code>v1</code> 表示稳定，<code>v1beta1</code>、<code>v1alpha2</code> 表示还在发展中。
+  有些实现还会安装自己的扩展资源，比如 Envoy Gateway 的 <code>BackendTrafficPolicy</code>、<code>ClientTrafficPolicy</code>。
+  我们重点关注三个核心资源：<strong>GatewayClass、Gateway、HTTPRoute</strong>。
+  把功能拆成多个专门的资源（而不是一个庞大的单体资源），正是为了适配基于角色的权限模型。
+</p>
+
+<h2 id="controllers">Gateway 控制器与 GatewayClass</h2>
+
+<p>
+  每个实现都有自己的控制器，负责 Gateway API 的控制平面：监视 API 服务器上的新 Gateway，并部署、更新或删除它们。
+  一个集群可以同时安装多个实现，所以 Gateway 通过 <strong>GatewayClass</strong> 指定由哪个控制器来管它。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 270" role="img" aria-label="两个 Gateway API 实现通过 GatewayClass 管理三个 Gateway">
+  <rect class="bx-d" x="10" y="10" width="740" height="250" rx="14"/>
+  <text class="sm" x="26" y="30">GKE 集群</text>
+
+  <rect class="bx-b" x="24" y="44" width="340" height="56" rx="10"/>
+  <text class="ttl on-b" x="194" y="68" text-anchor="middle">Envoy Gateway 控制器</text>
+  <text class="mono sm" x="194" y="88" text-anchor="middle" style="font-size:11px">gateway.envoyproxy.io/gatewayclass-controller</text>
+  <rect class="bx-g" x="400" y="44" width="340" height="56" rx="10"/>
+  <text class="ttl on-g" x="570" y="68" text-anchor="middle">GKE Gateway 控制器</text>
+  <text class="mono sm" x="570" y="88" text-anchor="middle">networking.gke.io/gateway</text>
+
+  <rect class="bx-p" x="110" y="128" width="160" height="40" rx="8"/>
+  <text class="lbl on-p" x="190" y="153" text-anchor="middle">GatewayClass eg</text>
+  <rect class="bx-p" x="490" y="128" width="160" height="40" rx="8"/>
+  <text class="lbl on-p" x="570" y="153" text-anchor="middle">GatewayClass gke-l7</text>
+
+  <rect class="bx-a" x="40" y="196" width="140" height="48" rx="8"/>
+  <text class="sm on-a" x="110" y="216" text-anchor="middle">Gateway A</text><text class="sm" x="110" y="234" text-anchor="middle">class: eg</text>
+  <rect class="bx-a" x="200" y="196" width="140" height="48" rx="8"/>
+  <text class="sm on-a" x="270" y="216" text-anchor="middle">Gateway B</text><text class="sm" x="270" y="234" text-anchor="middle">class: eg</text>
+  <rect class="bx-a" x="500" y="196" width="140" height="48" rx="8"/>
+  <text class="sm on-a" x="570" y="216" text-anchor="middle">Gateway C</text><text class="sm" x="570" y="234" text-anchor="middle">class: gke-l7</text>
+
+  <path class="ln-b" d="M190 102 V124" marker-end="url(#ar-b)"/>
+  <path class="ln-g" d="M570 102 V124" marker-end="url(#ar-g)"/>
+  <path class="ln" d="M160 170 L120 192" marker-end="url(#ar)"/>
+  <path class="ln" d="M220 170 L260 192" marker-end="url(#ar)"/>
+  <path class="ln" d="M570 170 V192" marker-end="url(#ar)"/>
+  <text class="sm" x="290" y="120">认领</text>
+  <text class="sm" x="670" y="120">认领</text>
+</svg>
+<figcaption>图 8-2　GatewayClass 把 Gateway 映射到对应的控制器</figcaption>
+</figure>
+
+<p>以 Envoy Gateway 为例，安装是典型的三步：</p>
+<ol>
+  <li>安装 API 资源；</li>
+  <li>部署控制器：它以 Pod 形式运行在 <code>envoy-gateway-system</code> Namespace 里（前面有个 ClusterIP Service），完整控制器名是 <code>gateway.envoyproxy.io/gatewayclass-controller</code>，开始监视声明了这个名字的 GatewayClass；</li>
+  <li>创建一个 GatewayClass（比如叫 <code>eg-external</code>）声明这个控制器名。控制器看到后<strong>认领（claim）</strong>它，并开始监视引用 <code>eg-external</code> 的 Gateway。</li>
+</ol>
+
+<h3>GatewayClass</h3>
+<p>最简单的形式，就是给控制器的长名字起个好记的短名：</p>
+
+<div class="code" data-lang="yaml">
+<pre>
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: eg-external        # Gateway 引用的友好名字
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+</pre>
+</div>
+
+<p>GatewayClass 还能「编程」控制器的行为。比如同一个 Envoy 控制器，定义两个 GatewayClass：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="同一个控制器通过两个 GatewayClass 创建公网和内网负载均衡器">
+  <rect class="bx-b" x="280" y="14" width="200" height="50" rx="10"/>
+  <text class="ttl on-b" x="380" y="44" text-anchor="middle">Envoy Gateway 控制器</text>
+  <rect class="bx-p" x="60" y="96" width="250" height="42" rx="8"/>
+  <text class="lbl on-p" x="185" y="122" text-anchor="middle">GatewayClass eg-external</text>
+  <rect class="bx-p" x="450" y="96" width="250" height="42" rx="8"/>
+  <text class="lbl on-p" x="575" y="122" text-anchor="middle">GatewayClass eg-internal</text>
+  <rect class="bx-a" x="60" y="150" width="250" height="40" rx="8"/>
+  <text class="sm on-a" x="185" y="175" text-anchor="middle">→ 带公网 IP 的互联网负载均衡器</text>
+  <rect class="bx-g" x="450" y="150" width="250" height="40" rx="8"/>
+  <text class="sm on-g" x="575" y="175" text-anchor="middle">→ 没有公网 IP 的内部负载均衡器</text>
+  <path class="ln" d="M330 66 L200 92" marker-end="url(#ar)"/>
+  <path class="ln" d="M430 66 L560 92" marker-end="url(#ar)"/>
+</svg>
+<figcaption>图 8-3　应用要什么样的负载均衡器，就让 Gateway 引用对应的 GatewayClass</figcaption>
+</figure>
+
+<div class="code" data-lang="yaml">
+<pre>
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: eg-internal
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+  parametersRef:                    # ┐ 引用一个名为 envoy-internal
+    group: gateway.envoyproxy.io    # │ 的 EnvoyProxy 资源
+    kind: EnvoyProxy                # │
+    name: envoy-internal            # ┘
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: envoy-internal
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyService:
+        type: LoadBalancer
+        annotations:
+          networking.gke.io/load-balancer-type: "Internal"   # GKE 内部负载均衡器
+</pre>
+</div>
+
+<p>被控制器认领的 GatewayClass 会显示 <code>ACCEPTED = True</code>；控制器名写错的则一直是 <code>Unknown</code>，等着永远不会来的控制器：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl get gc
+NAME          CONTROLLER                                      ACCEPTED
+eg-internal   gateway.envoyproxy.io/gatewayclass-controller   True
+fake          gateway.fake.io/made-up-provider                Unknown
+</pre>
+</div>
+
+<h2 id="gateways">Gateway：集群的入口</h2>
+
+<p>
+  Gateway 代表外部客户端进入集群的<strong>入口</strong>。在云上部署一个 Gateway，你会得到一个云的互联网负载均衡器；在笔记本集群上通常得到一个本地 IP。
+  <strong>Gateway 是负载均衡器，listener（监听器）是它的接口。</strong>
+</p>
+
+<div class="code" data-lang="yaml">
+<pre>
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: gtw-prod
+spec:
+  gatewayClassName: eg-external
+  listeners:
+  - name: http             # ┐ 接口 1：
+    protocol: HTTP         # │ 监听发往 myapp.com
+    hostname: "myapp.com"  # │ 的 HTTP 流量
+    port: 8080             # ┘ 端口 8080
+  - name: metrics          # ┐ 接口 2：
+    protocol: HTTP         # │ 监听发往 myapp.com
+    hostname: "myapp.com"  # │ 的 HTTP 流量
+    port: 5005             # ┘ 端口 5005
+</pre>
+</div>
+
+<h3>混合数据平面：L4 负载均衡器 + L7 代理 Pod</h3>
+
+<p>
+  部署上面这个 Gateway，你会得到一个<strong>混合数据平面</strong>：集群外的负载均衡器只做 <strong>L4 TCP 转发</strong>（只管端口），
+  集群内的数据平面 Pod（这里是 Envoy）实现 <strong>L7 智能</strong>（协议、主机名、路径路由、加权分流）。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="混合数据平面中流量从云负载均衡器经 NodePort 到数据平面 Pod 再到后端 Service">
+  <rect class="bx" x="20" y="110" width="100" height="56" rx="10"/>
+  <text class="ttl" x="70" y="142" text-anchor="middle">客户端</text>
+
+  <rect class="bx-a" x="150" y="90" width="150" height="96" rx="12"/>
+  <text class="ttl on-a" x="225" y="114" text-anchor="middle">云负载均衡器</text>
+  <text class="sm" x="225" y="136" text-anchor="middle">L4：只看端口</text>
+  <text class="mono sm" x="225" y="156" text-anchor="middle">:8080 / :5005</text>
+  <text class="sm" x="225" y="176" text-anchor="middle">集群外部</text>
+
+  <rect class="bx-d" x="330" y="14" width="420" height="262" rx="14"/>
+  <text class="sm" x="346" y="34">Kubernetes 集群</text>
+  <rect class="bx-b" x="346" y="96" width="110" height="84" rx="10"/>
+  <text class="lbl on-b" x="401" y="122" text-anchor="middle">节点</text>
+  <text class="mono sm" x="401" y="142" text-anchor="middle">NodePort</text>
+  <text class="mono sm" x="401" y="160" text-anchor="middle">31423</text>
+  <rect class="bx-p" x="486" y="80" width="120" height="116" rx="10"/>
+  <text class="ttl on-p" x="546" y="104" text-anchor="middle">数据平面 Pod</text>
+  <text class="sm" x="546" y="126" text-anchor="middle">L7：协议、</text>
+  <text class="sm" x="546" y="144" text-anchor="middle">主机名、路径、</text>
+  <text class="sm" x="546" y="162" text-anchor="middle">加权分流</text>
+  <text class="sm" x="546" y="182" text-anchor="middle">（Envoy/NGINX）</text>
+  <rect class="bx-g" x="636" y="96" width="100" height="84" rx="10"/>
+  <text class="lbl on-g" x="686" y="130" text-anchor="middle">后端</text>
+  <text class="lbl on-g" x="686" y="150" text-anchor="middle">Service</text>
+
+  <path class="ln" d="M122 138 H146" marker-end="url(#ar)"/>
+  <path class="ln" d="M302 138 H342" marker-end="url(#ar)"/>
+  <path class="ln" d="M458 138 H482" marker-end="url(#ar)"/>
+  <path class="ln" d="M608 138 H632" marker-end="url(#ar)"/>
+  <text class="sm" x="470" y="222" text-anchor="middle">kube-proxy 规则把 NodePort 流量转给数据平面 Pod</text>
+  <text class="sm" x="540" y="252" text-anchor="middle">控制器自动创建的 LoadBalancer Service 把这一切串起来</text>
+</svg>
+<figcaption>图 8-4　云 LB → NodePort → kube-proxy → 数据平面 Pod → 后端 Service</figcaption>
+</figure>
+
+<p>部署 Gateway 后幕后发生的事：</p>
+<ol class="steps">
+  <li>监视 <code>eg-external</code> 的 Envoy Gateway 控制器认领这个 Gateway；</li>
+  <li>控制器部署数据平面 Pod，并创建一个 <strong>LoadBalancer Service</strong>（端口与 Gateway 一致，选择器指向数据平面 Pod）作为「意图声明」；</li>
+  <li>API 服务器校验并持久化这个 Service，Service 控制器为每个端口分配 NodePort；</li>
+  <li>每个节点上的 kube-proxy 编写本地转发规则，把打到 NodePort 的流量负载均衡到数据平面 Pod；</li>
+  <li>云控制器管理器向云平台申请一个互联网负载均衡器，转发到节点的 NodePort；创建完成后把公网 IP 回写到 Service。</li>
+</ol>
+
+<div class="code" data-lang="yaml" data-file="控制器自动创建的 Service（节选）">
+<pre>
+apiVersion: v1
+kind: Service
+metadata:
+  name: envoy-default-gtw-prod-f71aafc2
+spec:
+  type: LoadBalancer         # 触发创建云负载均衡器
+  ports:
+  - name: port-8080          # 对应 "http" listener
+    port: 8080
+    protocol: TCP
+    targetPort: 8080
+    nodePort: 31423          # Service 控制器随后补上
+  - name: port-5005          # 对应 "metrics" listener
+    port: 5005
+    protocol: TCP
+    targetPort: 5005
+    nodePort: 30270
+  selector:
+    app.kubernetes.io/name: envoy
+    gateway.envoyproxy.io/owning-gateway-name: gtw-prod
+</pre>
+</div>
+
+<h2 id="httproutes">HTTPRoute：决定流量去哪</h2>
+
+<p>
+  <strong>Gateway 的 listener 负责接收流量，HTTPRoute 负责决定流量去哪。</strong>
+  把路由逻辑（HTTPRoute）和基础设施（Gateway）解耦，是一个关键的设计决策：基础设施管理员部署设施，开发者给它编程。
+</p>
+
+<div class="code" data-lang="yaml">
+<pre>
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: route-kits
+spec:
+  parentRefs:                # ┐ 绑定到 gtw-prod 的
+  - name: gtw-prod           # │ http listener
+    sectionName: http        # ┘
+  hostnames:                 # ┐ 只处理发往
+  - www.myapp.com            # ┘ www.myapp.com 的请求
+  rules:
+  - matches:                 # ┐
+    - path:                  # │ 匹配 /kits 路径
+        type: PathPrefix     # │
+        value: /kits         # ┘
+    backendRefs:
+    - name: svc-kits         # ┐ 80% 的请求发给
+      port: 8080             # │ svc-kits:8080
+      weight: 8              # ┘
+    - name: svc-kits-test    # ┐ 20% 的请求发给
+      port: 8080             # │ svc-kits-test:8080
+      weight: 2              # ┘
+</pre>
+</div>
+
+<h3>两层主机名过滤</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 220" role="img" aria-label="Gateway listener 主机名做准入，HTTPRoute 主机名做路由">
+  <rect class="bx" x="20" y="80" width="140" height="60" rx="10"/>
+  <text class="sm" x="90" y="106" text-anchor="middle">请求</text>
+  <text class="mono sm" x="90" y="126" text-anchor="middle">api.myapp.com</text>
+
+  <rect class="bx-a" x="200" y="56" width="200" height="108" rx="12"/>
+  <text class="ttl on-a" x="300" y="82" text-anchor="middle">Gateway listener</text>
+  <text class="mono sm" x="300" y="104" text-anchor="middle">hostname: myapp.com</text>
+  <text class="sm" x="300" y="128" text-anchor="middle">「准入控制」：</text>
+  <text class="sm" x="300" y="146" text-anchor="middle">这个请求让不让进？</text>
+
+  <rect class="bx-p" x="460" y="20" width="280" height="76" rx="10"/>
+  <text class="ttl on-p" x="600" y="44" text-anchor="middle">HTTPRoute A</text>
+  <text class="mono sm" x="600" y="66" text-anchor="middle">hostnames: www.myapp.com</text>
+  <text class="sm" x="600" y="86" text-anchor="middle">不匹配，跳过</text>
+  <rect class="bx-g" x="460" y="124" width="280" height="76" rx="10"/>
+  <text class="ttl on-g" x="600" y="148" text-anchor="middle">HTTPRoute B ✓</text>
+  <text class="mono sm" x="600" y="170" text-anchor="middle">hostnames: api.myapp.com</text>
+  <text class="sm" x="600" y="190" text-anchor="middle">「路由决策」：用这条规则</text>
+
+  <path class="ln" d="M162 110 H196" marker-end="url(#ar)"/>
+  <path class="ln-d" d="M402 100 L456 62"/>
+  <path class="ln-g" d="M402 124 L456 158" marker-end="url(#ar-g)"/>
+</svg>
+<figcaption>图 8-5　listener 主机名决定「能不能进」，HTTPRoute 主机名决定「走哪条路」；不写主机名则全部放行</figcaption>
+</figure>
+
+<h3>匹配规则：AND 与 OR</h3>
+
+<div class="vs">
+  <div class="new">
+    <div class="h">同一个 match 块里的条件 = AND</div>
+    <div class="code" data-lang="yaml">
+<pre>
+matches:
+- path:              # 路径是 /api
+    type: PathPrefix
+    value: /api
+  method: GET        # 并且 是 GET 请求
+</pre>
+    </div>
+  </div>
+  <div class="new">
+    <div class="h">多个 match 块 = OR</div>
+    <div class="code" data-lang="yaml">
+<pre>
+matches:
+- path:              # 路径是 /api
+    type: PathPrefix
+    value: /api
+- path:              # 或者 /apis
+    type: PathPrefix
+    value: /apis
+</pre>
+    </div>
+  </div>
+</div>
+
+<p><code>spec.rules</code> 可以按路径、请求头、HTTP 方法过滤。除了 HTTPRoute，Gateway API 还支持 GRPCRoute，并实验性地支持 TCPRoute、UDPRoute、TLSRoute。</p>
+
+<h2 id="together">把它们串起来</h2>
+
+<p>以 NGINX Gateway Fabric（默认控制器名 <code>gateway.nginx.org/nginx-gateway-controller</code>）为例：</p>
+
+<div class="code" data-lang="yaml">
+<pre>
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: nginx                  # Gateway 引用的友好名字
+spec:
+  controllerName: gateway.nginx.org/nginx-gateway-controller
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: gtw-prod-4
+spec:
+  gatewayClassName: nginx      # 使用这个 GatewayClass
+  listeners:
+  - name: list-kits
+    protocol: HTTP
+    port: 8080
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: route-kits
+spec:
+  parentRefs:
+  - name: gtw-prod-4           # 绑定到 gtw-prod-4 Gateway
+    sectionName: list-kits     # 的 list-kits listener
+  rules:
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /kits           # /kits 路径的请求
+    backendRefs:
+    - name: svc-kits           # 发给 svc-kits Service 的 9000 端口
+      port: 9000
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="Gateway API 的七步工作流">
+  <rect class="bx" x="20" y="20" width="160" height="50" rx="10"/><text class="sm" x="100" y="42" text-anchor="middle">① 安装 Gateway API</text><text class="sm" x="100" y="60" text-anchor="middle">资源</text>
+  <rect class="bx-b" x="205" y="20" width="160" height="50" rx="10"/><text class="sm" x="285" y="42" text-anchor="middle">② 部署控制器</text><text class="sm" x="285" y="60" text-anchor="middle">（控制平面）</text>
+  <rect class="bx-b" x="390" y="20" width="160" height="50" rx="10"/><text class="sm" x="470" y="42" text-anchor="middle">③ 控制器开始监视</text><text class="sm" x="470" y="60" text-anchor="middle">声明自己名字的 GC</text>
+  <rect class="bx-p" x="575" y="20" width="165" height="50" rx="10"/><text class="sm" x="657" y="42" text-anchor="middle">④ 创建 GatewayClass</text><text class="sm" x="657" y="60" text-anchor="middle">写上控制器全名</text>
+  <rect class="bx-p" x="575" y="110" width="165" height="56" rx="10"/><text class="sm" x="657" y="132" text-anchor="middle">⑤ 控制器认领 GC，</text><text class="sm" x="657" y="150" text-anchor="middle">开始监视引用它的 Gateway</text>
+  <rect class="bx-a" x="390" y="110" width="160" height="56" rx="10"/><text class="sm" x="470" y="134" text-anchor="middle">⑥ 部署引用该 GC</text><text class="sm" x="470" y="152" text-anchor="middle">的 Gateway</text>
+  <rect class="bx-g" x="205" y="110" width="160" height="56" rx="10"/><text class="sm" x="285" y="134" text-anchor="middle">⑦ 控制器调和 Gateway</text><text class="sm" x="285" y="152" text-anchor="middle">（创建数据平面）</text>
+  <rect class="bx-g" x="20" y="110" width="160" height="56" rx="10"/><text class="sm" x="100" y="134" text-anchor="middle">再部署 HTTPRoute</text><text class="sm" x="100" y="152" text-anchor="middle">给数据平面编程</text>
+  <path class="ln" d="M182 45 H201" marker-end="url(#ar)"/>
+  <path class="ln" d="M367 45 H386" marker-end="url(#ar)"/>
+  <path class="ln" d="M552 45 H571" marker-end="url(#ar)"/>
+  <path class="ln" d="M657 72 V106" marker-end="url(#ar)"/>
+  <path class="ln" d="M573 138 H554" marker-end="url(#ar)"/>
+  <path class="ln" d="M388 138 H369" marker-end="url(#ar)"/>
+  <path class="ln" d="M203 138 H184" marker-end="url(#ar)"/>
+  <text class="sm" x="380" y="198" text-anchor="middle">默认情况下，HTTPRoute 只能绑定到同一 Namespace 里的 Gateway listener</text>
+</svg>
+<figcaption>图 8-6　从安装到路由生效的完整工作流</figcaption>
+</figure>
+
+<h2 id="roles">面向角色的设计</h2>
+
+<p>Gateway API 的维护者从 Ingress 中吸取了很多教训，让资源可以映射到组织中的角色：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="三种资源分别对应三种角色">
+  <rect class="bx-r" x="20" y="20" width="220" height="190" rx="12"/>
+  <text class="ttl on-r" x="130" y="46" text-anchor="middle">基础设施管理员</text>
+  <rect class="bx-p" x="40" y="62" width="180" height="40" rx="8"/>
+  <text class="lbl on-p" x="130" y="87" text-anchor="middle">GatewayClass</text>
+  <text class="sm" x="130" y="130" text-anchor="middle">选择并安装公司认可的</text>
+  <text class="sm" x="130" y="148" text-anchor="middle">Gateway API 实现</text>
+  <text class="sm" x="130" y="182" text-anchor="middle">kube-infra 团队</text>
+
+  <rect class="bx-a" x="270" y="20" width="220" height="190" rx="12"/>
+  <text class="ttl on-a" x="380" y="46" text-anchor="middle">集群运维</text>
+  <rect class="bx-a" x="290" y="62" width="180" height="40" rx="8"/>
+  <text class="lbl on-a" x="380" y="87" text-anchor="middle">Gateway</text>
+  <text class="sm" x="380" y="130" text-anchor="middle">创建负载均衡器和 listener，</text>
+  <text class="sm" x="380" y="148" text-anchor="middle">决定允许哪些 Namespace 绑定</text>
+  <text class="sm" x="380" y="182" text-anchor="middle">cluster-ops 团队</text>
+
+  <rect class="bx-g" x="520" y="20" width="220" height="190" rx="12"/>
+  <text class="ttl on-g" x="630" y="46" text-anchor="middle">开发者</text>
+  <rect class="bx-g" x="540" y="62" width="180" height="40" rx="8"/>
+  <text class="lbl on-g" x="630" y="87" text-anchor="middle">HTTPRoute</text>
+  <text class="sm" x="630" y="130" text-anchor="middle">编写自己应用的路由规则，</text>
+  <text class="sm" x="630" y="148" text-anchor="middle">绑定到运维给的 listener</text>
+  <text class="sm" x="630" y="182" text-anchor="middle">各应用团队</text>
+  <path class="ln" d="M242 82 H266" marker-end="url(#ar)"/>
+  <path class="ln" d="M492 82 H516" marker-end="url(#ar)"/>
+</svg>
+<figcaption>图 8-7　资源模型 = 职责边界，天然适合用 RBAC 授权</figcaption>
+</figure>
+
+<div class="box note">
+  <div class="t">&#128221; 一个真实的协作流程</div>
+  <p>
+    你要上线一个新应用，用户通过 <code>www.myapp.com/kits</code> 的 8080 端口访问，你分到了新集群 <code>asia-south-kube17</code> 上的 <code>ns-kits</code> Namespace。
+    你把应用打包成 Deployment + ClusterIP Service，然后向 cluster-ops 团队申请一个监听 <code>myapp.com:8080</code> 的互联网负载均衡器。
+    这是新集群，cluster-ops 找 kube-infra 团队要 GatewayClass；kube-infra 安装公司认可的实现并告知 GatewayClass 名。
+    cluster-ops 在 <code>ns-infra</code> 里部署 Gateway，允许来自 <code>ns-kits</code> 的 HTTPRoute 绑定，并把 Gateway 和 listener 名告诉你。
+    最后你写一个 HTTPRoute 绑上去，把 <code>www.myapp.com/kits</code> 路由到你的 Service。分工清清楚楚。
+  </p>
+</div>
+
+<h2 id="planes">控制平面、数据平面与两种实现形态</h2>
+
+<ul>
+  <li><strong>控制平面</strong>：一个或多个 Gateway API 控制器 Pod，负责创建和配置数据平面。</li>
+  <li><strong>数据平面</strong>：处理真实流量，通常是「负载均衡器（L4）+ 一组数据平面 Pod（L7）」。</li>
+</ul>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="混合数据平面与全托管数据平面对比">
+  <rect class="bx-b" x="20" y="14" width="350" height="202" rx="12"/>
+  <text class="ttl on-b" x="195" y="40" text-anchor="middle">混合数据平面（本章采用）</text>
+  <rect class="bx" x="40" y="56" width="140" height="40" rx="8"/><text class="sm" x="110" y="81" text-anchor="middle">「笨」L4 负载均衡器</text>
+  <rect class="bx-p" x="210" y="56" width="140" height="40" rx="8"/><text class="sm" x="280" y="81" text-anchor="middle">集群内 L7 代理 Pod</text>
+  <path class="ln" d="M182 76 H206" marker-end="url(#ar)"/>
+  <text class="sm" x="40" y="124">自己安装 Cilium / Envoy / Istio / NGINX</text>
+  <text class="sm" x="40" y="144">每个 Gateway = 一个 L4 LB + 一组代理 Pod</text>
+  <text class="sm on-g" x="40" y="176">✓ 各环境配置一致，方便在云之间迁移</text>
+  <text class="sm on-r" x="40" y="198">✗ 代理 Pod 要你自己运维</text>
+
+  <rect class="bx-a" x="390" y="14" width="350" height="202" rx="12"/>
+  <text class="ttl on-a" x="565" y="40" text-anchor="middle">全托管数据平面</text>
+  <rect class="bx-a" x="440" y="56" width="250" height="40" rx="8"/><text class="sm" x="565" y="81" text-anchor="middle">云平台的全托管 L7 负载均衡器</text>
+  <text class="sm" x="410" y="124">建 AKS / EKS / GKE 集群时启用 Gateway 插件</text>
+  <text class="sm" x="410" y="144">没有用户可见的代理 Pod</text>
+  <text class="sm on-g" x="410" y="176">✓ 省心，云厂商全包</text>
+  <text class="sm on-r" x="410" y="198">✗ 专有实现，可能加深云锁定</text>
+</svg>
+<figcaption>图 8-8　两种数据平面形态</figcaption>
+</figure>
+
+<h2 id="install">动手：安装 Gateway API 实现</h2>
+
+<p>先检查集群里是否已经有可用的实现——有 GatewayClass 就说明有：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl get gc
+error: the server doesn't have a resource type "gatewayclass"
+</pre>
+</div>
+
+<h3>云集群：安装 NGINX Gateway Fabric</h3>
+<p>NGINX Gateway Fabric 是完全一致的实现，在云上会为每个 Gateway 自动创建一个互联网负载均衡器。需要 kubectl 和 <code>helm</code> 命令行工具。</p>
+
+<div class="code" data-lang="bash">
+<pre>
+# 第 1 步：安装 Gateway API 资源（注意中间的管道符 |）
+$ kubectl kustomize \
+  "https://github.com/nginx/nginx-gateway-fabric/config/crd/gateway-api/standard?ref=v2.3.0" \
+  | kubectl apply -f -
+
+# 第 2 步：安装控制器，并创建名为 nginx 的 GatewayClass
+$ helm install ngf oci://ghcr.io/nginx/charts/nginx-gateway-fabric \
+  --version 2.3.0 \
+  --namespace nginx-gateway \
+  --create-namespace
+
+$ kubectl get pods -n nginx-gateway
+NAME                                       READY   STATUS    RESTARTS
+ngf-nginx-gateway-fabric-5bff9d865-ls2zx   1/1     Running   0
+
+$ kubectl get gc
+NAME    CONTROLLER                                   ACCEPTED
+nginx   gateway.nginx.org/nginx-gateway-controller   True
+</pre>
+</div>
+
+<h3>本地 KIND 集群：安装 Cloud Provider for KIND</h3>
+<p>这是一个尽力而为的社区项目，提供用于本地测试的最小实现。先获取二进制文件：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ brew install cloud-provider-kind                          # Mac
+$ go install sigs.k8s.io/cloud-provider-kind@latest         # 或者用 Go 编译（任意系统）
+$ sudo install ~/go/bin/cloud-provider-kind /usr/local/bin
+
+# 在一个新的终端窗口里运行，并保持它一直运行
+$ sudo cloud-provider-kind --gateway-channel="standard"
+</pre>
+</div>
+
+<div class="box deep">
+  <div class="t">&#128302; 控制器可以不在集群里？</div>
+  <p>
+    这个进程安装 API 资源、创建 <code>cloud-provider-kind</code> GatewayClass，然后在你电脑上持续充当控制器。
+    大多数控制器以 Pod 形式运行在集群里，但这不是硬性要求——只要能以合适的权限访问 API 服务器，就能完成 watch 和调和。
+    不小心关掉了？重新运行即可。
+  </p>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl get gc
+NAME                  CONTROLLER                            ACCEPTED
+cloud-provider-kind   kind.sigs.k8s.io/gateway-controller   True
+</pre>
+</div>
+
+<h2 id="canary">动手：金丝雀分流（80/20）</h2>
+
+<p>部署同一应用的两个版本，用一个 Gateway 和一个 HTTPRoute 把 80% 的请求发给当前版本、20% 发给旧版本。命令都在 <code>gateway-api/app-canary</code> 目录下执行。</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="金丝雀分流示例架构">
+  <rect class="bx" x="20" y="90" width="100" height="56" rx="10"/>
+  <text class="ttl" x="70" y="122" text-anchor="middle">浏览器</text>
+  <rect class="bx-a" x="150" y="70" width="170" height="96" rx="12"/>
+  <text class="ttl on-a" x="235" y="96" text-anchor="middle">Gateway</text>
+  <text class="mono sm" x="235" y="118" text-anchor="middle">gtw-prod-1</text>
+  <text class="mono sm" x="235" y="136" text-anchor="middle">list-safc :8080</text>
+  <text class="sm" x="235" y="156" text-anchor="middle">gtw.yml</text>
+  <rect class="bx-p" x="350" y="70" width="160" height="96" rx="12"/>
+  <text class="ttl on-p" x="430" y="96" text-anchor="middle">HTTPRoute</text>
+  <text class="mono sm" x="430" y="118" text-anchor="middle">route-canary</text>
+  <text class="mono sm" x="430" y="136" text-anchor="middle">path: /</text>
+  <text class="sm" x="430" y="156" text-anchor="middle">route.yml</text>
+  <rect class="bx-g" x="560" y="20" width="180" height="86" rx="12"/>
+  <text class="ttl on-g" x="650" y="46" text-anchor="middle">svc-current</text>
+  <text class="sm" x="650" y="68" text-anchor="middle">Deployment current × 3</text>
+  <text class="sm" x="650" y="88" text-anchor="middle">当前队徽（狮子）</text>
+  <rect class="bx-b" x="560" y="130" width="180" height="86" rx="12"/>
+  <text class="ttl on-b" x="650" y="156" text-anchor="middle">svc-previous</text>
+  <text class="sm" x="650" y="178" text-anchor="middle">Deployment previous × 3</text>
+  <text class="sm" x="650" y="198" text-anchor="middle">旧队徽（船）</text>
+  <path class="ln" d="M122 118 H146" marker-end="url(#ar)"/>
+  <path class="ln" d="M322 118 H346" marker-end="url(#ar)"/>
+  <path class="ln-g" d="M512 100 L556 66" marker-end="url(#ar-g)"/>
+  <path class="ln-b" d="M512 136 L556 170" marker-end="url(#ar-b)"/>
+  <text class="ttl on-g" x="530" y="70" text-anchor="middle">80%</text>
+  <text class="ttl on-b" x="530" y="182" text-anchor="middle">20%</text>
+  <text class="sm" x="380" y="232" text-anchor="middle">两个应用及其 ClusterIP Service 都定义在 app.yml 里</text>
+</svg>
+<figcaption>图 8-9　金丝雀发布：大部分流量走稳定版，小部分流量试新（这里是旧）版</figcaption>
+</figure>
+
+<h3>1. 部署两个应用</h3>
+
+<div class="code" data-lang="yaml" data-file="gateway-api/app-canary/app.yml（节选：current 版本）">
+<pre>
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: current
+spec:
+  replicas: 3                    # 两个应用都是 3 个副本
+  selector:
+    matchLabels:
+      app: badge-lions
+  template:
+    metadata:
+      labels:
+        app: badge-lions
+    spec:
+      containers:
+      - name: web-pod
+        image: nigelpoulton/k8sbook:gtw-lion
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8080    # 应用监听 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: svc-current
+spec:
+  type: ClusterIP
+  selector:
+    app: badge-lions
+  ports:
+    - name: httpd
+      port: 8080                 # Service 监听 8080
+      targetPort: 8080           # 发给应用的 8080
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f app.yml
+service/svc-current created
+deployment.apps/current created
+service/svc-previous created
+deployment.apps/previous created
+
+$ kubectl get deploy
+NAME       READY   UP-TO-DATE   AVAILABLE   AGE
+current    3/3     3            3           25s
+previous   3/3     3            3           24s
+</pre>
+</div>
+
+<h3>2. 部署 Gateway</h3>
+
+<div class="code" data-lang="yaml" data-file="gateway-api/app-canary/gtw.yml">
+<pre>
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: gtw-prod-1
+spec:
+  gatewayClassName: nginx       # 要和你的 GatewayClass 名一致！
+  listeners:
+  - name: list-safc
+    protocol: HTTP              # 由数据平面 Pod 执行
+    port: 8080                  # 由 L4 负载均衡器执行
+    allowedRoutes:
+      namespaces:
+        from: Same              # 只允许同 Namespace 的 HTTPRoute 绑定
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 先改 gatewayClassName</div>
+  <p>用 KIND 的话要改成 <code>cloud-provider-kind</code>。不确定就运行 <code>kubectl get gc</code>，用 NAME 列的值。</p>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f gtw.yml
+gateway.gateway.networking.k8s.io/gtw-prod-1 created
+
+$ kubectl get gtw
+NAME         CLASS   ADDRESS        PROGRAMMED
+gtw-prod-1   nginx   139.14.17.33   True
+</pre>
+</div>
+
+<p>云上可能要等一两分钟才拿到 IP 并显示 PROGRAMMED。记下这个地址。</p>
+
+<h3>3. 部署 HTTPRoute</h3>
+
+<div class="code" data-lang="yaml" data-file="gateway-api/app-canary/route.yml">
+<pre>
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: route-canary
+spec:
+  parentRefs:                  # ┐ 绑定到 gtw-prod-1
+  - name: gtw-prod-1           # │ 的 list-safc listener
+    sectionName: list-safc     # ┘
+  rules:
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /               # 根路径下的所有请求
+    backendRefs:
+    - name: svc-current        # 80% → svc-current:8080
+      port: 8080
+      weight: 80
+    - name: svc-previous       # 20% → svc-previous:8080
+      port: 8080
+      weight: 20
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f route.yml
+httproute.gateway.networking.k8s.io/route-canary created
+
+$ kubectl get httproute
+NAME           HOSTNAMES   AGE
+route-canary               11s
+</pre>
+</div>
+
+<p>两者都在 <code>default</code> Namespace，而 listener 允许同 Namespace 的路由绑定，所以绑定成功。浏览器打开 <code>Gateway地址:8080</code>，多刷新几次，大约 80% 的时候看到当前队徽。</p>
+
+<div class="box tip">
+  <div class="t">&#128161; 示例应用里的小心思</div>
+  <p>
+    看 <code>source/app-ship/server.js</code> 会发现，作者把队徽图片用 base64 内联进 HTML。原因是：如果图片是单独的 PNG 请求，
+    HTML 和图片可能被分别负载均衡到不同版本，就得配置会话保持（session persistence），而并非所有 Gateway API 实现都支持它。
+  </p>
+</div>
+
+<h3>4. 看看幕后</h3>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl get svc
+NAME               TYPE           ...   EXTERNAL-IP    PORT(S)
+gtw-prod-1-nginx   LoadBalancer   ...   139.14.17.33   8080:30300/TCP
+
+$ kubectl describe svc gtw-prod-1-nginx
+Selector:    app.kubernetes.io/instance=ngf,           # 发给带这些标签的 Pod
+             app.kubernetes.io/name=gtw-prod-1-nginx   # （即数据平面 Pod）
+Type:        LoadBalancer
+IP:          10.128.231.207
+LB Ingress:  139.14.17.33 (VIP)        # 云负载均衡器的公网 IP
+Port:        port-8080  8080/TCP       # 云 LB 监听的端口
+NodePort:    port-8080  30300/TCP      # 云 LB 发往节点的端口
+TargetPort:  8080/TCP                  # 节点发往数据平面的端口
+Endpoints:   10.2.1.130:8080           # 数据平面 Pod 的 IP 和端口
+</pre>
+</div>
+
+<p>控制器自动创建了一个 LoadBalancer Service，它的外部 IP 就是 Gateway 的地址——和第 7 章学的 LoadBalancer Service 完全一样，只是后端换成了数据平面 Pod。</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl delete -f app.yml -f route.yml -f gtw.yml
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 一定要通过 Kubernetes 删除 Gateway</div>
+  <p>如果集群在云上，直接删集群并不会删掉云负载均衡器，你会继续为它付费。</p>
+</div>
+
+<h2 id="multitenant">动手：跨 Namespace 的多租户路由</h2>
+
+<p>
+  场景：公司有多个集群，需要强隔离的应用独占集群，其余应用在多租户集群上各占一个 Namespace。
+  现在要上线 <code>shield</code> 和 <code>hydra</code> 两个应用，通过 <code>myapp.com:8080/shield</code> 和 <code>/hydra</code> 访问，共享一个负载均衡器。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="共享 Gateway 跨 Namespace 路由到 shield 和 hydra">
+  <rect class="bx" x="20" y="120" width="110" height="60" rx="10"/>
+  <text class="sm" x="75" y="146" text-anchor="middle">myapp.com:8080</text>
+  <text class="sm" x="75" y="164" text-anchor="middle">/shield /hydra</text>
+
+  <rect class="bx-a" x="160" y="70" width="200" height="160" rx="12"/>
+  <text class="ttl on-a" x="260" y="94" text-anchor="middle">Namespace ns-infra</text>
+  <rect class="bx" x="176" y="108" width="168" height="108" rx="8"/>
+  <text class="lbl" x="260" y="130" text-anchor="middle">Gateway gtw-prod-6</text>
+  <text class="mono sm" x="260" y="152" text-anchor="middle">listener: http</text>
+  <text class="mono sm" x="260" y="170" text-anchor="middle">myapp.com:8080</text>
+  <text class="sm" x="260" y="194" text-anchor="middle">只允许带标签</text>
+  <text class="mono sm" x="260" y="210" text-anchor="middle">gtw-prod-6=yes 的 NS</text>
+
+  <rect class="bx-b" x="420" y="14" width="320" height="126" rx="12"/>
+  <text class="ttl on-b" x="436" y="38">Namespace ns-shield</text>
+  <text class="mono sm" x="600" y="38">gtw-prod-6=yes</text>
+  <rect class="bx-p" x="436" y="52" width="130" height="72" rx="8"/>
+  <text class="sm on-p" x="501" y="76" text-anchor="middle">HTTPRoute</text><text class="mono sm" x="501" y="96" text-anchor="middle">/shield</text>
+  <rect class="bx-g" x="590" y="52" width="134" height="72" rx="8"/>
+  <text class="sm on-g" x="657" y="76" text-anchor="middle">svc-shield</text><text class="sm" x="657" y="96" text-anchor="middle">shield Pod × 2</text>
+  <path class="ln" d="M568 88 H586" marker-end="url(#ar)"/>
+
+  <rect class="bx-b" x="420" y="160" width="320" height="126" rx="12"/>
+  <text class="ttl on-b" x="436" y="184">Namespace ns-hydra</text>
+  <text class="mono sm" x="600" y="184">gtw-prod-6=yes</text>
+  <rect class="bx-p" x="436" y="198" width="130" height="72" rx="8"/>
+  <text class="sm on-p" x="501" y="222" text-anchor="middle">HTTPRoute</text><text class="mono sm" x="501" y="242" text-anchor="middle">/hydra</text>
+  <rect class="bx-g" x="590" y="198" width="134" height="72" rx="8"/>
+  <text class="sm on-g" x="657" y="222" text-anchor="middle">svc-hydra</text><text class="sm" x="657" y="242" text-anchor="middle">hydra Pod × 2</text>
+  <path class="ln" d="M568 234 H586" marker-end="url(#ar)"/>
+
+  <path class="ln" d="M132 150 H156" marker-end="url(#ar)"/>
+  <path class="ln-a" d="M346 140 L432 90" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M346 180 L432 230" marker-end="url(#ar-a)"/>
+</svg>
+<figcaption>图 8-10　一个共享 Gateway，两个租户 Namespace，各自管理自己的 HTTPRoute</figcaption>
+</figure>
+
+<p>组织的 RBAC 分工（本实验不实际配置 RBAC，但 YAML 文件的拆分方式能直接对应）：</p>
+<ul>
+  <li><strong>infra-admins</strong>：管理集群和 Gateway API 实现</li>
+  <li><strong>cluster-ops</strong>：管理 Namespace 和 Gateway</li>
+  <li><strong>shield-devs</strong> / <strong>hydra-devs</strong>：各自管理自己应用的 HTTPRoute、Deployment 和 Service</li>
+</ul>
+
+<p>以下命令在 <code>gateway-api/app-xnamespace</code> 目录执行。</p>
+
+<h3>1. 创建 Namespace（cluster-ops）</h3>
+
+<div class="code" data-lang="yaml" data-file="gateway-api/app-xnamespace/ns.yml">
+<pre>
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ns-infra
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ns-shield
+  labels:
+    gtw-prod-6: "yes"      # 用于允许 HTTPRoute 绑定到 Gateway
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ns-hydra
+  labels:
+    gtw-prod-6: "yes"      # 用于允许 HTTPRoute 绑定到 Gateway
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f ns.yml
+namespace/ns-infra created
+namespace/ns-shield created
+namespace/ns-hydra created
+</pre>
+</div>
+
+<h3>2. 部署共享 Gateway（cluster-ops）</h3>
+
+<div class="code" data-lang="yaml" data-file="gateway-api/app-xnamespace/gtw.yml">
+<pre>
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: gtw-prod-6           # ┐ 在 ns-infra 里创建
+  namespace: ns-infra        # ┘ 名为 gtw-prod-6 的 Gateway
+spec:
+  gatewayClassName: nginx    # 用别的实现记得改
+  listeners:
+  - name: http               # ┐ 名为 http 的 listener，
+    hostname: "myapp.com"    # │ 监听发往 myapp.com
+    protocol: HTTP           # │ 8080 端口的 HTTP 请求
+    port: 8080               # ┘
+    allowedRoutes:
+      namespaces:
+        from: Selector       # ┐ 只允许来自带有
+        selector:            # │ gtw-prod-6=yes 标签的
+          matchLabels:       # │ Namespace 的路由绑定
+            gtw-prod-6: "yes"  # ┘
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f gtw.yml
+gateway.gateway.networking.k8s.io/gtw-prod-6 created
+
+$ kubectl get gtw -n ns-infra
+NAME         CLASS   ADDRESS         PROGRAMMED   AGE
+gtw-prod-6   nginx   143.42.179.81   True         20s
+</pre>
+</div>
+
+<h3>3. 部署应用和路由（各开发团队）</h3>
+
+<div class="code" data-lang="yaml" data-file="gateway-api/app-xnamespace/shield.yml（HTTPRoute 部分）">
+<pre>
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: route-shield
+  namespace: ns-shield       # 路由在租户自己的 Namespace
+spec:
+  parentRefs:
+  - name: gtw-prod-6
+    namespace: ns-infra      # 跨 Namespace 引用 Gateway
+    sectionName: http
+  rules:
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /shield
+    backendRefs:
+    - name: svc-shield
+      port: 8080
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 190" role="img" aria-label="HTTPRoute 绑定 listener 需要双方同意">
+  <rect class="bx-p" x="20" y="20" width="300" height="150" rx="12"/>
+  <text class="ttl on-p" x="170" y="44" text-anchor="middle">HTTPRoute 说：</text>
+  <text class="sm" x="40" y="72">「我想绑定到 ns-infra 里</text>
+  <text class="sm" x="40" y="92">gtw-prod-6 的 http listener」</text>
+  <text class="mono sm" x="40" y="124">parentRefs.namespace: ns-infra</text>
+  <text class="mono sm" x="40" y="144">parentRefs.sectionName: http</text>
+
+  <rect class="bx-a" x="440" y="20" width="300" height="150" rx="12"/>
+  <text class="ttl on-a" x="590" y="44" text-anchor="middle">Gateway listener 说：</text>
+  <text class="sm" x="460" y="72">「我只接受来自带有</text>
+  <text class="sm" x="460" y="92">gtw-prod-6=yes 标签的 NS 的路由」</text>
+  <text class="mono sm" x="460" y="124">allowedRoutes.namespaces</text>
+  <text class="mono sm" x="460" y="144">  .selector: gtw-prod-6=yes</text>
+
+  <text class="ttl on-g" x="380" y="90" text-anchor="middle">双方</text>
+  <text class="ttl on-g" x="380" y="112" text-anchor="middle">都同意</text>
+  <text class="ttl on-g" x="380" y="134" text-anchor="middle">才绑定</text>
+  <path class="ln-g" d="M322 70 H436" marker-end="url(#ar-g)" marker-start="url(#ar-g)"/>
+</svg>
+<figcaption>图 8-11　绑定是「双向握手」：路由请求绑定，listener 决定是否允许</figcaption>
+</figure>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f shield.yml
+service/svc-shield created
+deployment.apps/shield created
+httproute.gateway.networking.k8s.io/route-shield created
+
+$ kubectl apply -f hydra.yml
+service/svc-hydra created
+deployment.apps/hydra created
+httproute.gateway.networking.k8s.io/route-hydra created
+
+$ kubectl get all -n ns-shield
+</pre>
+</div>
+
+<h3>4. 配置 DNS 解析</h3>
+<p>
+  listener 只接受发往 <code>myapp.com</code> 的请求，所以要让 <code>myapp.com</code> 解析到 Gateway 的 IP。测试时改本机 hosts 文件即可：
+  Mac/Linux 是 <code>/etc/hosts</code>（需要 root），Windows 是 <code>C:\Windows\System32\drivers\etc\hosts</code>（以管理员身份打开记事本，打开对话框选「所有文件」）。
+  本地集群显示 localhost 的，用 <code>127.0.0.1</code>。
+</p>
+
+<div class="code" data-lang="text" data-file="/etc/hosts">
+<pre>
+# Host Database
+143.42.179.81   myapp.com
+</pre>
+</div>
+
+<h3>5. 测试</h3>
+<p>浏览器分别打开 <code>myapp.com:8080/shield</code> 和 <code>myapp.com:8080/hydra</code>，会看到两个不同的应用，Gateway 会在四个副本间负载均衡。</p>
+
+<h3>清理</h3>
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl delete -f shield.yml -f hydra.yml -f gtw.yml -f ns.yml
+$ sudo vi /etc/hosts        # 删掉 myapp.com 那一行
+</pre>
+</div>
+
+<h2 id="summary">小结</h2>
+<ul>
+  <li>Gateway API 取代 Ingress，成为把外部流量路由到 Kubernetes 应用的原生方案；它是一份规范，由 Cilium、Envoy、Istio、NGINX、Traefik 等项目实现。尽量选择 <code>gateway-api.sigs.k8s.io</code> 上列出的完全一致实现。</li>
+  <li>安装一个实现 = API 资源 + 控制器 + GatewayClass。</li>
+  <li><strong>GatewayClass</strong> 指定由哪个控制器管理 Gateway；<strong>Gateway</strong> 就是负载均衡器实例（每部署一个就多一个 LB）；<strong>HTTPRoute</strong> 实现高级路由，支持金丝雀、A/B 等发布模式。</li>
+  <li>混合数据平面 = L4 负载均衡器 + 集群内 L7 代理 Pod；全托管数据平面由云平台包办但可能带来锁定。</li>
+  <li>资源模型为 RBAC 而设计：Gateway 和路由规则分离，不同团队各管各的，并能控制哪些路由可以绑定到哪个 Gateway。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>把金丝雀实验的权重改成 50/50，重新 apply <code>route.yml</code>，刷新 20 次统计一下比例。</li>
+    <li>给 <code>route-canary</code> 加一条规则：请求头 <code>x-version: previous</code> 的请求 100% 发给 <code>svc-previous</code>，用 <code>curl -H</code> 测试。（提示：在 <code>matches</code> 里使用 <code>headers</code>。）</li>
+    <li>在跨 Namespace 实验中，把 <code>ns-hydra</code> 的 <code>gtw-prod-6</code> 标签删掉（<code>kubectl label ns ns-hydra gtw-prod-6-</code>），再访问 <code>/hydra</code>，用 <code>kubectl describe httproute -n ns-hydra</code> 看看状态里说了什么。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

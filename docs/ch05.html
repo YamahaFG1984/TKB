@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 5 章 · Namespace — Kubernetes 入门实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="5">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 5 章</span>
+<h1>Namespace：把集群切成虚拟集群</h1>
+<p class="lede">
+  一个集群往往要给好几个团队、好几套环境共用。Namespace（命名空间）就是用来把一个物理集群
+  划分成多个<strong>虚拟集群</strong>的工具。这一章篇幅不长，但后面几乎每章都会用到它。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>分清 Kubernetes Namespace 和 Linux 内核命名空间</li>
+    <li>理解 Namespace 只提供<strong>软隔离</strong>，什么时候该用多个集群</li>
+    <li>认识集群自带的 4 个 Namespace</li>
+    <li>用命令式和声明式两种方法创建 Namespace、往里部署对象</li>
+    <li>让 kubectl 默认操作某个 Namespace</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="intro">两种「命名空间」，别搞混</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="内核命名空间与 Kubernetes Namespace 的对比">
+  <rect class="bx-b" x="20" y="14" width="350" height="200" rx="12"/>
+  <text class="ttl on-b" x="195" y="40" text-anchor="middle">Linux 内核命名空间</text>
+  <rect class="bx" x="40" y="56" width="310" height="34" rx="8"/>
+  <text class="lbl" x="195" y="78" text-anchor="middle">一个操作系统</text>
+  <rect class="bx-g" x="40" y="104" width="94" height="50" rx="8"/><text class="sm" x="87" y="134" text-anchor="middle">容器</text>
+  <rect class="bx-g" x="148" y="104" width="94" height="50" rx="8"/><text class="sm" x="195" y="134" text-anchor="middle">容器</text>
+  <rect class="bx-g" x="256" y="104" width="94" height="50" rx="8"/><text class="sm" x="303" y="134" text-anchor="middle">容器</text>
+  <text class="sm" x="195" y="186" text-anchor="middle">把一个<tspan class="on-b">操作系统</tspan>切成多个虚拟 OS</text>
+  <text class="sm" x="195" y="204" text-anchor="middle">（也就是容器）</text>
+
+  <rect class="bx-a" x="390" y="14" width="350" height="200" rx="12"/>
+  <text class="ttl on-a" x="565" y="40" text-anchor="middle">Kubernetes Namespace</text>
+  <rect class="bx" x="410" y="56" width="310" height="34" rx="8"/>
+  <text class="lbl" x="565" y="78" text-anchor="middle">一个 Kubernetes 集群</text>
+  <rect class="bx-p" x="410" y="104" width="94" height="50" rx="8"/><text class="sm" x="457" y="134" text-anchor="middle">dev</text>
+  <rect class="bx-p" x="518" y="104" width="94" height="50" rx="8"/><text class="sm" x="565" y="134" text-anchor="middle">test</text>
+  <rect class="bx-p" x="626" y="104" width="94" height="50" rx="8"/><text class="sm" x="673" y="134" text-anchor="middle">qa</text>
+  <text class="sm" x="565" y="186" text-anchor="middle">把一个<tspan class="on-a">集群</tspan>切成多个虚拟集群</text>
+  <text class="sm" x="565" y="204" text-anchor="middle">（也就是 Namespace）</text>
+</svg>
+<figcaption>图 5-1　同样的思路，不同的层次</figcaption>
+</figure>
+
+<p>
+  本书把 Kubernetes 的 Namespace 首字母大写，以区别于内核命名空间。
+  每个 Namespace 可以有自己的用户、权限、资源配额和策略。但请牢记：<strong>Namespace 只提供软隔离</strong>——
+  一个 Namespace 里被攻破的工作负载，很容易影响到其他 Namespace 里的工作负载。
+</p>
+
+<h3>哪些对象属于 Namespace？</h3>
+<p>大部分对象都是<strong>命名空间级</strong>的（可以部署到指定 Namespace）；少数是<strong>集群级</strong>的，比如 Node 和 PersistentVolume。用这个命令查看：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl api-resources
+NAME                     SHORTNAMES   APIVERSION   NAMESPACED   KIND
+nodes                    no           v1           false        Node
+persistentvolumeclaims   pvc          v1           true         PersistentVolumeClaim
+persistentvolumes        pv           v1           false        PersistentVolume
+pods                     po           v1           true         Pod
+resourcequotas           quota        v1           true         ResourceQuota
+secrets                               v1           true         Secret
+serviceaccounts          sa           v1           true         ServiceAccount
+services                 svc          v1           true         Service
+...
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 顺便学会简称</div>
+  <p><code>SHORTNAMES</code> 一列是 kubectl 可用的简写：<code>kubectl get po</code> = <code>kubectl get pods</code>，<code>svc</code> = services，<code>ns</code> = namespaces。</p>
+</div>
+
+<h2 id="use-cases">Namespace 的使用场景</h2>
+
+<p>
+  Namespace 是让多个<strong>租户（tenant）</strong>共享同一集群的方式。租户可以是应用、团队、部门，甚至外部客户。
+  最常见的是在<strong>同一组织内部</strong>划分，比如按组织架构把生产集群分成三个 Namespace：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 220" role="img" aria-label="按部门把集群划分成三个 Namespace">
+  <rect class="bx" x="20" y="14" width="720" height="194" rx="14"/>
+  <text class="ttl" x="40" y="38">生产集群</text>
+  <rect class="bx-b" x="40" y="52" width="210" height="140" rx="10"/>
+  <text class="ttl on-b" x="145" y="76" text-anchor="middle">finance</text>
+  <text class="sm" x="56" y="102">财务的应用</text>
+  <text class="sm" x="56" y="122">财务的用户与权限</text>
+  <text class="sm" x="56" y="142">配额：16 核 / 64G</text>
+  <text class="sm" x="56" y="162">自己的策略</text>
+  <rect class="bx-g" x="275" y="52" width="210" height="140" rx="10"/>
+  <text class="ttl on-g" x="380" y="76" text-anchor="middle">hr</text>
+  <text class="sm" x="291" y="102">人事的应用</text>
+  <text class="sm" x="291" y="122">人事的用户与权限</text>
+  <text class="sm" x="291" y="142">配额：4 核 / 16G</text>
+  <text class="sm" x="291" y="162">自己的策略</text>
+  <rect class="bx-p" x="510" y="52" width="210" height="140" rx="10"/>
+  <text class="ttl on-p" x="615" y="76" text-anchor="middle">corporate-ops</text>
+  <text class="sm" x="526" y="102">企业运营的应用</text>
+  <text class="sm" x="526" y="122">运营的用户与权限</text>
+  <text class="sm" x="526" y="142">配额：8 核 / 32G</text>
+  <text class="sm" x="526" y="162">自己的策略</text>
+</svg>
+<figcaption>图 5-2　每个 Namespace 都可以有自己的用户、权限、配额和策略</figcaption>
+</figure>
+
+<h3>软隔离 vs 硬隔离</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="Namespace 软隔离与多集群硬隔离">
+  <rect class="bx-a" x="20" y="14" width="320" height="222" rx="12"/>
+  <text class="ttl on-a" x="180" y="38" text-anchor="middle">软隔离：一个集群 + 多个 Namespace</text>
+  <rect class="bx" x="40" y="52" width="280" height="30" rx="6"/>
+  <text class="sm" x="180" y="72" text-anchor="middle">共享的控制平面</text>
+  <rect class="bx-b" x="40" y="92" width="130" height="56" rx="8"/><text class="sm" x="105" y="124" text-anchor="middle">Namespace A</text>
+  <rect class="bx-r" x="190" y="92" width="130" height="56" rx="8"/><text class="sm" x="255" y="116" text-anchor="middle">Namespace B</text><text class="sm on-r" x="255" y="134" text-anchor="middle">被攻破！</text>
+  <path class="ln-r" d="M188 120 H174" marker-end="url(#ar-r)"/>
+  <rect class="bx" x="40" y="158" width="280" height="30" rx="6"/>
+  <text class="sm" x="180" y="178" text-anchor="middle">共享的节点 / 硬件</text>
+  <text class="sm on-g" x="180" y="208" text-anchor="middle">✓ 轻量、好管理、省钱</text>
+  <text class="sm on-r" x="180" y="226" text-anchor="middle">✗ 坏人可能「越狱」影响邻居</text>
+
+  <rect class="bx-g" x="360" y="14" width="380" height="222" rx="12"/>
+  <text class="ttl on-g" x="550" y="38" text-anchor="middle">硬隔离：每个租户一个集群、独立硬件</text>
+  <rect class="bx" x="380" y="52" width="160" height="136" rx="10"/>
+  <text class="sm" x="460" y="74" text-anchor="middle">集群 A</text>
+  <rect class="bx" x="392" y="84" width="136" height="26" rx="6"/><text class="sm" x="460" y="102" text-anchor="middle">控制平面</text>
+  <rect class="bx-b" x="392" y="116" width="136" height="34" rx="6"/><text class="sm" x="460" y="138" text-anchor="middle">租户 A</text>
+  <rect class="bx" x="392" y="156" width="136" height="24" rx="6"/><text class="sm" x="460" y="173" text-anchor="middle">专用硬件</text>
+  <rect class="bx" x="560" y="52" width="160" height="136" rx="10"/>
+  <text class="sm" x="640" y="74" text-anchor="middle">集群 B</text>
+  <rect class="bx" x="572" y="84" width="136" height="26" rx="6"/><text class="sm" x="640" y="102" text-anchor="middle">控制平面</text>
+  <rect class="bx-r" x="572" y="116" width="136" height="34" rx="6"/><text class="sm" x="640" y="138" text-anchor="middle">租户 B</text>
+  <rect class="bx" x="572" y="156" width="136" height="24" rx="6"/><text class="sm" x="640" y="173" text-anchor="middle">专用硬件</text>
+  <text class="sm on-g" x="550" y="208" text-anchor="middle">✓ 强隔离，互不影响</text>
+  <text class="sm on-r" x="550" y="226" text-anchor="middle">✗ 成本更高，管理更累</text>
+</svg>
+<figcaption>图 5-3　Namespace 适合组织内部；外部租户通常用独立集群</figcaption>
+</figure>
+
+<div class="box key">
+  <div class="t">&#9733; 选择的经验法则</div>
+  <p>
+    信任彼此的内部团队、开发/测试/预发环境 → <strong>Namespace</strong>。<br>
+    互不信任的外部客户、强合规要求 → <strong>独立集群 + 独立硬件</strong>（撰写本书时最常见的强隔离做法）。
+  </p>
+</div>
+
+<h2 id="defaults">集群自带的 Namespace</h2>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl get namespaces
+NAME              STATUS   AGE
+default           Active   52m
+kube-system       Active   52m
+kube-public       Active   52m
+kube-node-lease   Active   52m
+</pre>
+</div>
+
+<div class="cards">
+  <div class="card"><span class="ic">&#128193;</span><h4>default</h4><p>创建对象时没指定 Namespace，就放到这里。</p></div>
+  <div class="card"><span class="ic">&#9881;</span><h4>kube-system</h4><p>控制平面组件住在这里，比如集群内部 DNS、metrics server。</p></div>
+  <div class="card"><span class="ic">&#128227;</span><h4>kube-public</h4><p>存放需要对所有人可读的对象。</p></div>
+  <div class="card"><span class="ic">&#128147;</span><h4>kube-node-lease</h4><p>用于节点心跳和节点租约管理。</p></div>
+</div>
+
+<p><code>-n</code>（或 <code>--namespace</code>）指定查哪个 Namespace，<code>--all-namespaces</code>（或 <code>-A</code>）查全部：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl describe ns default
+Name:         default
+Labels:       kubernetes.io/metadata.name=default
+Status:       Active
+No resource quota.
+No LimitRange resource.
+
+$ kubectl get svc --namespace kube-system
+NAME             TYPE        CLUSTER-IP    EXTERNAL-IP   PORT(S)
+kube-dns         ClusterIP   10.43.0.10    &lt;none&gt;        53/UDP,53/TCP,9153...
+metrics-server   ClusterIP   10.43.4.203   &lt;none&gt;        443/TCP
+</pre>
+</div>
+
+<h2 id="create">创建和管理 Namespace</h2>
+
+<p>以下命令在仓库的 <code>namespaces</code> 目录执行。Namespace 是核心 <code>v1</code> API 组里的一等资源，命令式和声明式都能用：</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">命令式：一条命令</div>
+    <div class="code" data-lang="bash">
+<pre>
+$ kubectl create ns hydra
+namespace/hydra created
+</pre>
+    </div>
+  </div>
+  <div class="new">
+    <div class="h">声明式：YAML 文件（推荐）</div>
+    <div class="code" data-lang="yaml" data-file="namespaces/shield-ns.yml">
+<pre>
+kind: Namespace
+apiVersion: v1
+metadata:
+  name: shield
+  labels:
+    env: marvel
+</pre>
+    </div>
+  </div>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f shield-ns.yml
+namespace/shield created
+
+$ kubectl get ns
+NAME     STATUS   AGE
+...
+hydra    Active   23s
+shield   Active   11s
+
+$ kubectl delete ns hydra        # 漫威里神盾局和九头蛇是死敌，别让它们共享一个集群
+namespace "hydra" deleted
+</pre>
+</div>
+
+<h3>让 kubectl 默认使用某个 Namespace</h3>
+<p>每条命令都加 <code>-n shield</code> 很烦。更好的办法是修改 kubeconfig 当前 context 的默认 Namespace：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl config set-context --current --namespace shield
+Context "tkb" modified.
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 150" role="img" aria-label="context 中的 namespace 字段决定 kubectl 的默认命名空间">
+  <rect class="bx-a" x="20" y="20" width="300" height="110" rx="12"/>
+  <text class="ttl on-a" x="170" y="44" text-anchor="middle">kubeconfig 里的 context</text>
+  <text class="mono sm" x="40" y="70">cluster:   docker-desktop</text>
+  <text class="mono sm" x="40" y="90">user:      docker-desktop</text>
+  <text class="mono sm on-a" x="40" y="110">namespace: shield   ← 新增</text>
+  <path class="ln-a" d="M322 75 H396" marker-end="url(#ar-a)"/>
+  <rect class="bx" x="400" y="20" width="340" height="110" rx="12"/>
+  <text class="mono sm" x="420" y="50">kubectl get pods</text>
+  <text class="sm" x="420" y="70">等价于</text>
+  <text class="mono sm" x="420" y="90">kubectl get pods -n shield</text>
+  <text class="sm" x="420" y="116">命令行上的 -n 仍然可以临时覆盖它</text>
+</svg>
+<figcaption>图 5-4　默认 Namespace 是 context 的一部分</figcaption>
+</figure>
+
+<h2 id="deploy">往 Namespace 里部署对象</h2>
+
+<p>两种方式：命令式在命令上加 <code>-n</code>；声明式在 YAML 的 <code>metadata.namespace</code> 里写明。来看 <code>app.yml</code>，它用 <code>---</code> 分隔，在一个文件里定义了三个对象：</p>
+
+<div class="code" data-lang="yaml" data-file="namespaces/app.yml">
+<pre>
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  namespace: shield          # ← 目标 Namespace
+  name: default
+---
+apiVersion: v1
+kind: Service
+metadata:
+  namespace: shield          # ← 目标 Namespace
+  name: the-bus
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 8080
+    targetPort: 8080
+  selector:
+    env: marvel
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  namespace: shield          # ← 目标 Namespace
+  name: triskelion
+  labels:
+    env: marvel
+spec:
+  containers:
+  - image: nigelpoulton/k8sbook:shield-01
+    name: bus-ctr
+    ports:
+    - containerPort: 8080
+    imagePullPolicy: Always
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="shield Namespace 中的三个对象">
+  <rect class="bx-a" x="20" y="14" width="720" height="172" rx="14"/>
+  <text class="ttl on-a" x="40" y="38">Namespace：shield</text>
+  <rect class="bx-p" x="44" y="60" width="190" height="96" rx="10"/>
+  <text class="ttl on-p" x="139" y="86" text-anchor="middle">ServiceAccount</text>
+  <text class="mono sm" x="139" y="108" text-anchor="middle">default</text>
+  <text class="sm" x="139" y="132" text-anchor="middle">Pod 的身份（第 13 章）</text>
+  <rect class="bx-b" x="284" y="60" width="190" height="96" rx="10"/>
+  <text class="ttl on-b" x="379" y="86" text-anchor="middle">Service</text>
+  <text class="mono sm" x="379" y="108" text-anchor="middle">the-bus :8080</text>
+  <text class="sm" x="379" y="132" text-anchor="middle">selector: env=marvel</text>
+  <rect class="bx-g" x="524" y="60" width="190" height="96" rx="10"/>
+  <text class="ttl on-g" x="619" y="86" text-anchor="middle">Pod</text>
+  <text class="mono sm" x="619" y="108" text-anchor="middle">triskelion</text>
+  <text class="sm" x="619" y="132" text-anchor="middle">label: env=marvel</text>
+  <path class="ln-b" d="M476 108 H520" marker-end="url(#ar-b)"/>
+</svg>
+<figcaption>图 5-5　Service 通过标签 env=marvel 找到 Pod</figcaption>
+</figure>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f app.yml
+serviceaccount/default configured
+service/the-bus configured
+pod/triskelion created
+
+$ kubectl get pods -n shield
+NAME         READY   STATUS    RESTARTS   AGE
+triskelion   1/1     Running   0          59s
+
+$ kubectl get svc -n shield
+NAME      TYPE           CLUSTER-IP     EXTERNAL-IP   PORT(S)          AGE
+the-bus   LoadBalancer   10.43.30.174   localhost     8080:31112/TCP   68s
+
+$ curl localhost:8080
+&lt;!DOCTYPE html&gt;
+&lt;html&gt;
+&lt;head&gt;
+&lt;title&gt;AOS&lt;/title&gt;
+...
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; Docker Desktop 的小坑</div>
+  <p>有些 Docker Desktop 集群会把 <code>EXTERNAL-IP</code> 错误地显示成 <code>172.x.x.x</code>，这时用 <code>localhost:8080</code> 访问即可。ServiceAccount 缺少注解的警告也可以忽略。</p>
+</div>
+
+<h2 id="cleanup">清理</h2>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl delete ns shield              # 删除 Namespace 会连带删除里面的所有对象
+namespace "shield" deleted
+
+$ kubectl config set-context --current --namespace default   # 别忘了改回来！
+Context "tkb" modified.
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 删除 Namespace 是「连锅端」</div>
+  <p>它会删掉里面的 Pod、Service、ServiceAccount 等全部对象，在生产环境操作前务必三思。另外，如果不把默认 Namespace 改回 <code>default</code>，之后的命令会针对一个已经不存在的 Namespace，什么都查不到。</p>
+</div>
+
+<h2 id="summary">小结</h2>
+<ul>
+  <li>Namespace 把一个集群切成多个虚拟集群，每个可以有自己的用户、RBAC 规则、配额和策略。</li>
+  <li>它只提供<strong>软隔离</strong>，不能用于强多租户；强隔离需要独立集群和硬件。</li>
+  <li>不指定时对象会进入 <code>default</code>；系统组件在 <code>kube-system</code>。</li>
+  <li>用 <code>-n</code> 临时指定，用 <code>metadata.namespace</code> 声明式指定，用 <code>kubectl config set-context --current --namespace</code> 设置默认值。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>运行 <code>kubectl get pods -A</code>，看看 <code>kube-system</code> 里都跑着哪些系统 Pod，能认出第 2 章讲过的组件吗？</li>
+    <li>创建 <code>dev</code> 和 <code>test</code> 两个 Namespace，在两边各部署一个<strong>同名</strong>的 Pod。为什么不会冲突？</li>
+    <li>运行 <code>kubectl api-resources --namespaced=false</code>，列出所有集群级资源。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

@@ -1,0 +1,648 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 10 章 · 存储 — Kubernetes 入门实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="10">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 10 章</span>
+<h1>存储：PV、PVC 与 StorageClass</h1>
+<p class="lede">
+  Pod 会死，容器里写的数据也会跟着消失。真实业务需要能长期保存的数据。
+  Kubernetes 的<strong>持久卷子系统</strong>能轻松对接各种外部存储系统，并借助它们提供备份恢复、复制、快照、加密等高级数据服务。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>看懂存储的三层架构：存储提供方 → CSI 插件 → 持久卷子系统</li>
+    <li>理解 <strong>PV、PVC、SC</strong> 各自的角色，以及动态供应的完整流程</li>
+    <li>掌握访问模式（RWO / RWX / ROX）和回收策略（Delete / Retain）</li>
+    <li>理解卷绑定模式 <code>Immediate</code> 与 <code>WaitForFirstConsumer</code></li>
+    <li>动手：用现成的 StorageClass 申请卷；创建自己的 StorageClass 并挂载到 Pod</li>
+  </ul>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 本章动手部分需要云集群</div>
+  <p>
+    示例基于 Akamai 的 <strong>LKE</strong>，在其他云上不能直接运行，因为每个云都有自己的存储插件和配置项。
+    仓库的 <code>storage/</code> 目录同时提供了 GKE 版本（<code>gke-*.yml</code>），用 GKE 的话换成对应文件即可。原理在各个云上都是相通的。
+  </p>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="big-picture">全局视图</h2>
+
+<p>Kubernetes 支持来自各种外部系统的块存储、文件存储和对象存储，它们可以在云上，也可以在你自己的机房里。</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 270" role="img" aria-label="存储提供方、CSI 插件层和 Kubernetes 持久卷子系统">
+  <rect class="bx" x="20" y="14" width="210" height="242" rx="14"/>
+  <text class="ttl" x="125" y="40" text-anchor="middle">存储提供方</text>
+  <rect class="bx-b" x="40" y="56" width="170" height="38" rx="8"/><text class="sm" x="125" y="80" text-anchor="middle">AWS EBS / EFS</text>
+  <rect class="bx-b" x="40" y="102" width="170" height="38" rx="8"/><text class="sm" x="125" y="126" text-anchor="middle">GCP Persistent Disk</text>
+  <rect class="bx-b" x="40" y="148" width="170" height="38" rx="8"/><text class="sm" x="125" y="172" text-anchor="middle">Linode Block Storage</text>
+  <rect class="bx-b" x="40" y="194" width="170" height="38" rx="8"/><text class="sm" x="125" y="218" text-anchor="middle">NetApp / EMC（自建）</text>
+
+  <rect class="bx-a" x="275" y="14" width="200" height="242" rx="14"/>
+  <text class="ttl on-a" x="375" y="40" text-anchor="middle">插件层：CSI</text>
+  <text class="sm" x="375" y="76" text-anchor="middle">容器存储接口</text>
+  <text class="sm" x="375" y="96" text-anchor="middle">业界标准</text>
+  <rect class="bx" x="295" y="116" width="160" height="34" rx="8"/><text class="mono sm" x="375" y="138" text-anchor="middle">ebs.csi.aws.com</text>
+  <rect class="bx" x="295" y="158" width="160" height="34" rx="8"/><text class="mono sm" x="375" y="180" text-anchor="middle">pd.csi.storage.gke.io</text>
+  <rect class="bx" x="295" y="200" width="160" height="34" rx="8"/><text class="mono sm" x="375" y="222" text-anchor="middle">linodebs.csi…</text>
+
+  <rect class="bx-g" x="520" y="14" width="220" height="242" rx="14"/>
+  <text class="ttl on-g" x="630" y="40" text-anchor="middle">持久卷子系统</text>
+  <rect class="bx-p" x="540" y="60" width="180" height="50" rx="8"/>
+  <text class="ttl on-p" x="630" y="82" text-anchor="middle">StorageClass（SC）</text>
+  <text class="sm" x="630" y="100" text-anchor="middle">让一切自动、动态</text>
+  <rect class="bx-g" x="540" y="122" width="180" height="50" rx="8"/>
+  <text class="ttl on-g" x="630" y="144" text-anchor="middle">PersistentVolume（PV）</text>
+  <text class="sm" x="630" y="162" text-anchor="middle">映射一个外部卷</text>
+  <rect class="bx-b" x="540" y="184" width="180" height="50" rx="8"/>
+  <text class="ttl on-b" x="630" y="206" text-anchor="middle">PVC</text>
+  <text class="sm" x="630" y="224" text-anchor="middle">授予 Pod 使用 PV 的权利</text>
+
+  <path class="ln" d="M232 135 H271" marker-start="url(#ar)" marker-end="url(#ar)"/>
+  <path class="ln" d="M477 135 H516" marker-start="url(#ar)" marker-end="url(#ar)"/>
+</svg>
+<figcaption>图 10-1　左边提供存储，中间负责翻译，右边让应用方便地使用</figcaption>
+</figure>
+
+<div class="cards">
+  <div class="card"><span class="ic">&#128190;</span><h4>PV：PersistentVolume</h4><p>把一个外部卷「映射」进 Kubernetes。</p></div>
+  <div class="card"><span class="ic">&#127915;</span><h4>PVC：PersistentVolumeClaim</h4><p>一张「领用单」，授予 Pod 访问某个 PV 的权利。</p></div>
+  <div class="card"><span class="ic">&#127981;</span><h4>SC：StorageClass</h4><p>存储的「档位」，按需动态创建外部卷和 PV。</p></div>
+</div>
+
+<h3>一次动态供应的完整流程（以 AWS 为例）</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 280" role="img" aria-label="PVC 通过 StorageClass 和 CSI 插件创建 EBS 卷并映射为 PV 的七个步骤">
+  <rect class="bx-b" x="20" y="100" width="150" height="80" rx="12"/>
+  <text class="ttl on-b" x="95" y="126" text-anchor="middle">AWS 后端</text>
+  <text class="sm" x="95" y="150" text-anchor="middle">50GB EBS 卷</text>
+  <text class="sm" x="95" y="168" text-anchor="middle">（④ 被创建）</text>
+
+  <rect class="bx-a" x="210" y="100" width="140" height="80" rx="12"/>
+  <text class="ttl on-a" x="280" y="132" text-anchor="middle">AWS CSI 插件</text>
+  <text class="mono sm" x="280" y="154" text-anchor="middle">ebs.csi.aws.com</text>
+
+  <rect class="bx-p" x="390" y="100" width="130" height="80" rx="12"/>
+  <text class="ttl on-p" x="455" y="132" text-anchor="middle">StorageClass</text>
+  <text class="sm" x="455" y="154" text-anchor="middle">⑥ 创建 PV</text>
+
+  <rect class="bx-g" x="390" y="210" width="130" height="50" rx="10"/>
+  <text class="ttl on-g" x="455" y="240" text-anchor="middle">PV（50GB）</text>
+
+  <rect class="bx-b" x="560" y="100" width="80" height="80" rx="12"/>
+  <text class="ttl on-b" x="600" y="136" text-anchor="middle">PVC</text>
+  <text class="sm" x="600" y="156" text-anchor="middle">50GB</text>
+
+  <rect class="bx" x="670" y="100" width="70" height="80" rx="12"/>
+  <text class="ttl" x="705" y="144" text-anchor="middle">Pod</text>
+
+  <path class="ln-b" d="M668 120 H644" marker-end="url(#ar-b)"/><text class="sm on-b" x="655" y="92" text-anchor="middle">①</text>
+  <path class="ln-b" d="M558 120 H524" marker-end="url(#ar-b)"/><text class="sm on-b" x="540" y="112" text-anchor="middle">②</text>
+  <path class="ln-a" d="M388 120 H354" marker-end="url(#ar-a)"/><text class="sm on-a" x="370" y="112" text-anchor="middle">③</text>
+  <path class="ln-a" d="M208 120 H174" marker-end="url(#ar-a)"/><text class="sm on-a" x="190" y="112" text-anchor="middle">④</text>
+  <path class="ln-g" d="M174 160 H206" marker-end="url(#ar-g)"/>
+  <path class="ln-g" d="M354 160 H386" marker-end="url(#ar-g)"/><text class="sm on-g" x="370" y="176" text-anchor="middle">⑤</text>
+  <path class="ln-g" d="M455 182 V206" marker-end="url(#ar-g)"/>
+  <path class="ln-g" d="M522 235 H705 V184" marker-end="url(#ar-g)"/><text class="sm on-g" x="620" y="252" text-anchor="middle">⑦ Pod 挂载并使用</text>
+
+  <text class="sm" x="20" y="24">① Pod 通过 PVC 申请 50GB　② PVC 请 SC 创建 PV 和后端卷</text>
+  <text class="sm" x="20" y="44">③ SC 通过 AWS CSI 插件调用后端　④ 插件在 AWS 上创建 50GB EBS 卷</text>
+  <text class="sm" x="20" y="64">⑤ 插件把创建结果报告给 SC　⑥ SC 创建 PV 并映射到 EBS 卷　⑦ Pod 挂载 PV</text>
+</svg>
+<figcaption>图 10-2　卷供应工作流</figcaption>
+</figure>
+
+<div class="box note">
+  <div class="t">&#9432; 两条规则</div>
+  <ul>
+    <li>Kubernetes 有机制防止多个 Pod 同时写同一个 PV；</li>
+    <li>外部卷和 PV 是 <strong>1:1</strong> 的：不能把一个 50GB 外部卷切成两个 25GB 的 PV。</li>
+  </ul>
+</div>
+
+<h2 id="providers">存储提供方与 CSI</h2>
+
+<p>
+  外部存储系统通常称为<strong>提供方（provider）</strong>或<strong>供应器（provisioner）</strong>。每个提供方都提供自己的 <strong>CSI 插件</strong>（也叫驱动 driver），
+  暴露后端的功能和配置项，一般以 Helm chart 或 YAML 安装器分发，装好后以 Pod 形式运行在 <code>kube-system</code> 里。
+  大多数云平台会预装自家存储服务的 CSI 插件；第三方存储需要手动安装。插件列表见 <code>kubernetes-csi.github.io/docs/drivers.html</code>。
+</p>
+
+<ul>
+  <li>有些限制显而易见：集群在 Azure 上就没法挂 AWS EBS 卷；Pod 可能必须和存储在同一个地域或可用区。</li>
+  <li>卷大小、保护级别、快照计划、复制、加密等，全都通过后端的 CSI 插件配置。各后端支持的功能不同，读插件文档是你的责任。</li>
+</ul>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">CSI 之前：in-tree（树内）</div>
+    <div style="padding:10px 16px;font-size:14.5px">所有存储插件都写在 Kubernetes 主代码树里：被迫开源，更新和修复要跟着 Kubernetes 的发布节奏走，插件开发者和 Kubernetes 维护者都很痛苦。</div>
+  </div>
+  <div class="new">
+    <div class="h">CSI 之后：out-of-tree（树外）</div>
+    <div style="padding:10px 16px;font-size:14.5px">CSI 是开源的业界标准接口。插件独立开发，不必开源，随时可以发布；理论上能在任何支持 CSI 的编排平台上运行。</div>
+  </div>
+</div>
+
+<h2 id="subsystem">持久卷子系统</h2>
+
+<p>假设外部存储系统有四个档位，你为每个档位创建一个 StorageClass，让 Kubernetes 能用上全部四种：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="外部存储档位映射为 StorageClass">
+  <text class="ttl" x="120" y="24" text-anchor="middle">外部存储档位</text>
+  <text class="ttl" x="400" y="24" text-anchor="middle">Kubernetes StorageClass</text>
+  <text class="ttl" x="650" y="24" text-anchor="middle">CSI 插件</text>
+  <g>
+    <rect class="bx-b" x="30" y="40" width="180" height="38" rx="8"/><text class="sm" x="120" y="64" text-anchor="middle">闪存块存储</text>
+    <rect class="bx-p" x="300" y="40" width="200" height="38" rx="8"/><text class="mono sm" x="400" y="64" text-anchor="middle">sc-fast-block</text>
+    <rect class="bx" x="570" y="40" width="160" height="38" rx="8"/><text class="mono sm" x="650" y="64" text-anchor="middle">csi.xyz.block</text>
+  </g>
+  <g>
+    <rect class="bx-b" x="30" y="90" width="180" height="38" rx="8"/><text class="sm" x="120" y="114" text-anchor="middle">加密闪存块存储</text>
+    <rect class="bx-p" x="300" y="90" width="200" height="38" rx="8"/><text class="mono sm" x="400" y="114" text-anchor="middle">sc-fast-encrypted</text>
+    <rect class="bx" x="570" y="90" width="160" height="38" rx="8"/><text class="mono sm" x="650" y="114" text-anchor="middle">csi.xyz.block</text>
+  </g>
+  <g>
+    <rect class="bx-b" x="30" y="140" width="180" height="38" rx="8"/><text class="sm" x="120" y="164" text-anchor="middle">机械盘块存储</text>
+    <rect class="bx-p" x="300" y="140" width="200" height="38" rx="8"/><text class="mono sm" x="400" y="164" text-anchor="middle">sc-slow</text>
+    <rect class="bx" x="570" y="140" width="160" height="38" rx="8"/><text class="mono sm" x="650" y="164" text-anchor="middle">csi.xyz.block</text>
+  </g>
+  <g>
+    <rect class="bx-b" x="30" y="190" width="180" height="38" rx="8"/><text class="sm" x="120" y="214" text-anchor="middle">NFS 文件存储</text>
+    <rect class="bx-p" x="300" y="190" width="200" height="38" rx="8"/><text class="mono sm" x="400" y="214" text-anchor="middle">sc-file</text>
+    <rect class="bx" x="570" y="190" width="160" height="38" rx="8"/><text class="mono sm" x="650" y="214" text-anchor="middle">csi.xyz.file</text>
+  </g>
+  <path class="ln" d="M212 59 H296"/><path class="ln" d="M212 109 H296"/><path class="ln" d="M212 159 H296"/><path class="ln" d="M212 209 H296"/>
+  <path class="ln" d="M502 59 H566"/><path class="ln" d="M502 109 H566"/><path class="ln" d="M502 159 H566"/><path class="ln" d="M502 209 H566"/>
+</svg>
+<figcaption>图 10-3　每个存储档位对应一个 StorageClass</figcaption>
+</figure>
+
+<p>
+  现在要部署一个需要 100GB 加密闪存的应用：写一个 Pod，引用一个 PVC，PVC 从 <code>sc-fast-encrypted</code> 申请 100GB。
+  SC 控制器看到新 PVC，指示 CSI 插件在外部系统上创建 100GB 加密闪存卷；外部系统创建完成后通知插件，插件告知 SC 控制器，SC 控制器把它映射成新的 PV；Pod 通过 PVC 挂载使用这个 PV。
+</p>
+
+<h2 id="storageclass">用 StorageClass 动态供应</h2>
+
+<p>StorageClass 属于 <code>storage.k8s.io/v1</code> API 组，简写 <code>sc</code>。下面这个 SC 叫 <code>fast-local</code>，在 AWS 爱尔兰区域创建每 GB 10 IOPS 的加密 SSD 卷：</p>
+
+<div class="code" data-lang="yaml">
+<pre>
+kind: StorageClass
+apiVersion: storage.k8s.io/v1
+metadata:
+  name: fast-local
+provisioner: ebs.csi.aws.com      # AWS EBS 的 CSI 插件
+parameters:
+  encrypted: true                 # 创建加密卷
+  type: io1                       # AWS SSD 盘
+  iopsPerGB: "10"                 # 性能要求
+allowedTopologies:                # 卷和副本创建在哪里
+- matchLabelExpressions:
+  - key: topology.ebs.csi.aws.com/zone
+    values:
+    - eu-west-1a                  # AWS 爱尔兰区域
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 关于 StorageClass 的四点</div>
+  <ol>
+    <li>StorageClass <strong>不可变</strong>：部署后不能修改；</li>
+    <li><code>metadata.name</code> 要有意义，别人和其他对象都靠它引用这个档位；</li>
+    <li>provisioner、plugin、driver 这几个词经常混用；</li>
+    <li><code>parameters</code> 块里是插件专属的配置，每个插件都不一样。</li>
+  </ol>
+</div>
+
+<h3>Pod → PVC → SC 的引用链</h3>
+
+<p>基本工作流：① 安装配置 CSI 插件 → ② 创建一个或多个 StorageClass → ③ 部署带 PVC 的 Pod，通过 SC 申请卷。三个对象可以写在同一个文件里，用 <code>---</code> 分隔：</p>
+
+<div class="code" data-lang="yaml">
+<pre>
+apiVersion: v1
+kind: Pod                         # 1. Pod
+metadata:
+  name: mypod
+spec:
+  volumes:
+  - name: data
+    persistentVolumeClaim:
+      claimName: mypvc            # 2. 通过名为 mypvc 的 PVC 申请卷
+  containers: ...
+---
+apiVersion: v1
+kind: PersistentVolumeClaim       # 3. 这就是 mypvc
+metadata:
+  name: mypvc
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi               # 4. 申请一个 50Gi 的卷……
+  storageClassName: fast          # 5. ……基于 fast 这个 StorageClass
+---
+kind: StorageClass                # 6. 这就是 fast
+apiVersion: storage.k8s.io/v1
+metadata:
+  name: fast
+provisioner: pd.csi.storage.gke.io  # 7. 使用这个 CSI 插件
+parameters:
+  type: pd-ssd                    # 8. 创建这种类型的存储（GCP SSD）
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 140" role="img" aria-label="Pod 通过 claimName 引用 PVC，PVC 通过 storageClassName 引用 SC">
+  <rect class="bx" x="20" y="30" width="150" height="70" rx="12"/>
+  <text class="ttl" x="95" y="58" text-anchor="middle">Pod mypod</text>
+  <text class="sm" x="95" y="80" text-anchor="middle">在 volumes 里引用</text>
+  <rect class="bx-b" x="250" y="30" width="170" height="70" rx="12"/>
+  <text class="ttl on-b" x="335" y="58" text-anchor="middle">PVC mypvc</text>
+  <text class="sm" x="335" y="80" text-anchor="middle">50Gi · RWO</text>
+  <rect class="bx-p" x="500" y="30" width="240" height="70" rx="12"/>
+  <text class="ttl on-p" x="620" y="58" text-anchor="middle">SC fast</text>
+  <text class="mono sm" x="620" y="80" text-anchor="middle">pd.csi.storage.gke.io · pd-ssd</text>
+  <path class="ln" d="M172 65 H246" marker-end="url(#ar)"/>
+  <text class="mono sm" x="210" y="56" text-anchor="middle">claimName</text>
+  <path class="ln" d="M422 65 H496" marker-end="url(#ar)"/>
+  <text class="mono sm" x="460" y="56" text-anchor="middle">scName</text>
+  <text class="sm" x="380" y="128" text-anchor="middle">靠名字一环扣一环：Pod 不需要知道存储在哪、怎么创建</text>
+</svg>
+<figcaption>图 10-4　按名字逐级引用</figcaption>
+</figure>
+
+<h2 id="settings">访问模式与回收策略</h2>
+
+<h3>访问模式</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="三种访问模式">
+  <rect class="bx-b" x="20" y="14" width="230" height="182" rx="12"/>
+  <text class="ttl on-b" x="135" y="40" text-anchor="middle">ReadWriteOnce（RWO）</text>
+  <rect class="bx" x="95" y="56" width="80" height="34" rx="6"/><text class="sm" x="135" y="78" text-anchor="middle">PVC</text>
+  <rect class="bx-g" x="85" y="124" width="100" height="34" rx="6"/><text class="sm" x="135" y="146" text-anchor="middle">卷</text>
+  <path class="ln-b" d="M135 92 V120" marker-end="url(#ar-b)"/><text class="sm on-b" x="145" y="110">读写</text>
+  <text class="sm" x="135" y="182" text-anchor="middle">只能被一个 PVC 读写绑定</text>
+
+  <rect class="bx-g" x="265" y="14" width="230" height="182" rx="12"/>
+  <text class="ttl on-g" x="380" y="40" text-anchor="middle">ReadWriteMany（RWM）</text>
+  <rect class="bx" x="285" y="56" width="56" height="34" rx="6"/><text class="sm" x="313" y="78" text-anchor="middle">PVC</text>
+  <rect class="bx" x="352" y="56" width="56" height="34" rx="6"/><text class="sm" x="380" y="78" text-anchor="middle">PVC</text>
+  <rect class="bx" x="419" y="56" width="56" height="34" rx="6"/><text class="sm" x="447" y="78" text-anchor="middle">PVC</text>
+  <rect class="bx-g" x="330" y="124" width="100" height="34" rx="6"/><text class="sm" x="380" y="146" text-anchor="middle">卷</text>
+  <path class="ln-g" d="M313 92 L360 120" marker-end="url(#ar-g)"/><path class="ln-g" d="M380 92 V120" marker-end="url(#ar-g)"/><path class="ln-g" d="M447 92 L400 120" marker-end="url(#ar-g)"/>
+  <text class="sm" x="380" y="182" text-anchor="middle">多个 PVC 读写；文件/对象存储常支持</text>
+
+  <rect class="bx-a" x="510" y="14" width="230" height="182" rx="12"/>
+  <text class="ttl on-a" x="625" y="40" text-anchor="middle">ReadOnlyMany（ROM）</text>
+  <rect class="bx" x="530" y="56" width="56" height="34" rx="6"/><text class="sm" x="558" y="78" text-anchor="middle">PVC</text>
+  <rect class="bx" x="597" y="56" width="56" height="34" rx="6"/><text class="sm" x="625" y="78" text-anchor="middle">PVC</text>
+  <rect class="bx" x="664" y="56" width="56" height="34" rx="6"/><text class="sm" x="692" y="78" text-anchor="middle">PVC</text>
+  <rect class="bx-g" x="575" y="124" width="100" height="34" rx="6"/><text class="sm" x="625" y="146" text-anchor="middle">卷</text>
+  <path class="ln-d" d="M558 92 L605 120" marker-end="url(#ar)"/><path class="ln-d" d="M625 92 V120" marker-end="url(#ar)"/><path class="ln-d" d="M692 92 L645 120" marker-end="url(#ar)"/>
+  <text class="sm" x="625" y="182" text-anchor="middle">多个 PVC 只读绑定</text>
+</svg>
+<figcaption>图 10-5　块存储通常只支持 RWO</figcaption>
+</figure>
+
+<p>注意：一个 PV 只能以<strong>一种</strong>模式打开。不能让一个 PVC 以 ROM 绑定它，同时另一个 PVC 以 RWM 绑定。</p>
+
+<h3>回收策略（ReclaimPolicy）</h3>
+<p>当 PVC 被释放时，PV 和外部存储怎么办？</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="Delete 与 Retain 回收策略对比">
+  <rect class="bx-r" x="20" y="14" width="350" height="182" rx="12"/>
+  <text class="ttl on-r" x="195" y="40" text-anchor="middle">Delete（动态供应的默认值）</text>
+  <rect class="bx" x="40" y="58" width="90" height="36" rx="6"/><text class="sm" x="85" y="81" text-anchor="middle">删除 PVC</text>
+  <rect class="bx-r" x="150" y="58" width="80" height="36" rx="6" stroke-dasharray="5 4"/><text class="sm" x="190" y="81" text-anchor="middle">PV ✗</text>
+  <rect class="bx-r" x="250" y="58" width="100" height="36" rx="6" stroke-dasharray="5 4"/><text class="sm" x="300" y="81" text-anchor="middle">外部卷 ✗</text>
+  <path class="ln-r" d="M132 76 H146" marker-end="url(#ar-r)"/><path class="ln-r" d="M232 76 H246" marker-end="url(#ar-r)"/>
+  <text class="sm" x="40" y="126">删除 PVC 会连带删除 PV 和外部存储</text>
+  <text class="sm on-r" x="40" y="150">最危险！数据随之消失</text>
+  <text class="sm" x="40" y="176">请谨慎使用</text>
+
+  <rect class="bx-g" x="390" y="14" width="350" height="182" rx="12"/>
+  <text class="ttl on-g" x="565" y="40" text-anchor="middle">Retain</text>
+  <rect class="bx" x="410" y="58" width="90" height="36" rx="6"/><text class="sm" x="455" y="81" text-anchor="middle">删除 PVC</text>
+  <rect class="bx-g" x="520" y="58" width="80" height="36" rx="6"/><text class="sm" x="560" y="81" text-anchor="middle">PV ✓</text>
+  <rect class="bx-g" x="620" y="58" width="100" height="36" rx="6"/><text class="sm" x="670" y="81" text-anchor="middle">外部卷 ✓</text>
+  <text class="sm" x="410" y="126">PV 和外部存储都保留下来</text>
+  <text class="sm on-g" x="410" y="150">更安全，数据还在</text>
+  <text class="sm" x="410" y="176">代价：需要你手动回收资源</text>
+</svg>
+<figcaption>图 10-6　生产数据请认真选择回收策略</figcaption>
+</figure>
+
+<div class="box tip">
+  <div class="t">&#128161; StorageClass 小结</div>
+  <p>
+    StorageClass 代表存储档位，应用调用它来动态创建卷。它引用一个插件，并绑定到某个外部存储系统上的某类存储。
+    部署后，SC 控制器监视 API 服务器上引用它的新 PVC；每出现一个，就在外部系统上创建所需的卷，并映射成应用可以挂载的 PV。
+  </p>
+</div>
+
+<h2 id="existing">动手：使用现有的 StorageClass</h2>
+
+<div class="code" data-lang="bash">
+<pre>
+$ cd storage
+$ kubectl get sc
+NAME                           PROVISIONER               RECLAIMPOLICY   VOLUMEBINDINGMODE   ALLOWVOLUMEEXPANSION
+linode-block-storage           linodebs.csi.linode.com   Delete          Immediate           true
+linode-block-storage-retain (default)  linodebs.csi.linode.com   Retain    Immediate           true
+</pre>
+</div>
+
+<p>
+  LKE 预建了两个 SC，都通过 <code>linodebs.csi.linode.com</code> 插件供应，一个回收策略是 Delete，一个是 Retain。
+  标着 <code>(default)</code> 的是<strong>默认 SC</strong>：PVC 不指定 SC 时就用它。不同集群的默认 SC 可能不一样，所以重要的生产应用最好<strong>显式指定</strong>。
+  有的集群会预建很多 SC，比如 GKE Autopilot 区域集群就有 8 个，分别使用 Filestore（NFS）、Persistent Disk（块存储）和旧的树内插件。
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl describe sc linode-block-storage
+Name:                  linode-block-storage
+IsDefaultClass:        No
+Provisioner:           linodebs.csi.linode.com
+Parameters:            &lt;none&gt;
+AllowVolumeExpansion:  True
+ReclaimPolicy:         Delete
+VolumeBindingMode:     Immediate
+</pre>
+</div>
+
+<div class="code" data-lang="yaml" data-file="storage/lke-pvc-test.yml">
+<pre>
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-test
+spec:
+  accessModes:
+  - ReadWriteOnce
+  storageClassName: linode-block-storage
+  resources:
+    requests:
+      storage: 10Gi
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl get pv
+No resources found
+
+$ kubectl apply -f lke-pvc-test.yml
+persistentvolumeclaim/pvc-test created
+
+$ kubectl get pvc
+NAME       STATUS   VOLUME                 CAPACITY   ACCESS MODES   STORAGECLASS
+pvc-test   Bound    pvc-cc3dd8716c7d46c9   10Gi       RWO            linode-block-storage
+
+$ kubectl get pv
+NAME                   CAPACITY   ACCESS MODES   RECLAIM POLICY   STATUS   CLAIM      STORAGECLASS
+pvc-cc3dd8716c7d46c9   10Gi       RWO            Delete           Bound    pvc-test   linode-block-storage
+</pre>
+</div>
+
+<p>
+  PVC 立刻就 <code>Bound</code> 了，因为这个 SC 的绑定模式是 <code>Immediate</code>：不等 Pod 来用，马上创建 PV 和后端卷。
+  打开 LKE 控制台的 Volumes 页，能看到一个同名的 10GB 卷。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 180" role="img" aria-label="LKE 示例中各对象的映射关系">
+  <rect class="bx" x="20" y="50" width="140" height="70" rx="12"/>
+  <text class="ttl" x="90" y="78" text-anchor="middle">Linode 卷</text>
+  <text class="sm" x="90" y="100" text-anchor="middle">10GB</text>
+  <rect class="bx-a" x="200" y="50" width="140" height="70" rx="12"/>
+  <text class="ttl on-a" x="270" y="78" text-anchor="middle">CSI 插件</text>
+  <text class="mono sm" x="270" y="100" text-anchor="middle">linodebs…</text>
+  <rect class="bx-p" x="380" y="14" width="160" height="56" rx="10"/>
+  <text class="ttl on-p" x="460" y="36" text-anchor="middle">SC</text>
+  <text class="mono sm" x="460" y="56" text-anchor="middle">linode-block-storage</text>
+  <rect class="bx-g" x="380" y="100" width="160" height="56" rx="10"/>
+  <text class="ttl on-g" x="460" y="122" text-anchor="middle">PV</text>
+  <text class="mono sm" x="460" y="142" text-anchor="middle">pvc-cc3dd8…</text>
+  <rect class="bx-b" x="580" y="100" width="140" height="56" rx="10"/>
+  <text class="ttl on-b" x="650" y="122" text-anchor="middle">PVC</text>
+  <text class="mono sm" x="650" y="142" text-anchor="middle">pvc-test</text>
+  <rect class="bx-d" x="580" y="14" width="140" height="56" rx="10"/>
+  <text class="sm" x="650" y="38" text-anchor="middle">Pod（还没有）</text>
+  <text class="sm" x="650" y="56" text-anchor="middle">下一节补上</text>
+  <path class="ln" d="M162 85 H196"/><path class="ln" d="M342 85 L376 46"/><path class="ln" d="M342 85 L376 126"/>
+  <path class="ln" d="M542 128 H576"/><path class="ln-d" d="M650 98 V72"/>
+</svg>
+<figcaption>图 10-7　所有东西如何对应起来</figcaption>
+</figure>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl delete pvc pvc-test
+persistentvolumeclaim "pvc-test" deleted
+
+$ kubectl get pv            # 回收策略是 Delete，所以 PV 和 Linode 卷都被删了
+No resources found
+</pre>
+</div>
+
+<h2 id="new-sc">动手：创建并使用自己的 StorageClass</h2>
+
+<p>
+  这次创建一个实现<strong>拓扑感知供应（topology-aware provisioning）</strong>的 SC，也叫<strong>按需供应</strong>：等到有 Pod 要用时才创建卷，
+  确保卷和 Pod 在同一个地域和可用区。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="Immediate 与 WaitForFirstConsumer 两种绑定模式的时间线">
+  <text class="ttl" x="20" y="24">volumeBindingMode: Immediate</text>
+  <path class="ln" d="M20 70 H740" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="40" y="40" width="130" height="26" rx="6"/><text class="sm" x="105" y="58" text-anchor="middle">创建 PVC</text>
+  <rect class="bx-g" x="190" y="40" width="170" height="26" rx="6"/><text class="sm" x="275" y="58" text-anchor="middle">立刻创建 PV + 卷</text>
+  <rect class="bx" x="520" y="40" width="130" height="26" rx="6"/><text class="sm" x="585" y="58" text-anchor="middle">之后 Pod 才来</text>
+  <text class="sm on-r" x="380" y="96" text-anchor="middle">风险：卷可能建在一个可用区，Pod 却被调度到另一个可用区</text>
+
+  <text class="ttl" x="20" y="140">volumeBindingMode: WaitForFirstConsumer</text>
+  <path class="ln" d="M20 186 H740" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="40" y="156" width="130" height="26" rx="6"/><text class="sm" x="105" y="174" text-anchor="middle">创建 PVC</text>
+  <rect class="bx-a" x="190" y="156" width="170" height="26" rx="6"/><text class="sm" x="275" y="174" text-anchor="middle">Pending，等待……</text>
+  <rect class="bx" x="380" y="156" width="130" height="26" rx="6"/><text class="sm" x="445" y="174" text-anchor="middle">Pod 引用 PVC</text>
+  <rect class="bx-g" x="530" y="156" width="190" height="26" rx="6"/><text class="sm" x="625" y="174" text-anchor="middle">在 Pod 所在处创建 PV + 卷</text>
+  <text class="sm on-g" x="380" y="214" text-anchor="middle">卷和 Pod 一定在同一地域、同一可用区</text>
+</svg>
+<figcaption>图 10-8　两种卷绑定模式</figcaption>
+</figure>
+
+<div class="code" data-lang="yaml" data-file="storage/lke-sc-wait-keep.yml">
+<pre>
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: block-wait-keep
+provisioner: linodebs.csi.linode.com       # CSI 插件
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer    # 按需供应
+reclaimPolicy: Retain                      # PVC 释放后保留卷
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f lke-sc-wait-keep.yml
+storageclass.storage.k8s.io/block-wait-keep created
+</pre>
+</div>
+
+<div class="code" data-lang="yaml" data-file="storage/lke-pvc-wait-keep.yml">
+<pre>
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-wait-keep
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+  storageClassName: block-wait-keep
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f lke-pvc-wait-keep.yml
+persistentvolumeclaim/pvc-wait-keep created
+
+$ kubectl get pvc
+NAME            STATUS    VOLUME   CAPACITY   ACCESS MODES   STORAGECLASS
+pvc-wait-keep   Pending                                      block-wait-keep
+
+$ kubectl get pv
+No resources found
+</pre>
+</div>
+
+<p>PVC 处于 <code>Pending</code>，还没有 PV——它在等第一个使用者。现在部署使用它的 Pod：</p>
+
+<div class="code" data-lang="yaml" data-file="storage/lke-app.yml">
+<pre>
+apiVersion: v1
+kind: Pod
+metadata:
+  name: volpod
+spec:
+  volumes:                         # ┐ 从名为 pvc-wait-keep 的 PVC
+  - name: data                     # │ 创建一个叫 data 的卷
+    persistentVolumeClaim:         # │
+      claimName: pvc-wait-keep     # ┘
+  containers:
+  - name: ubuntu-ctr
+    image: ubuntu:latest
+    command:
+    - /bin/bash
+    - "-c"
+    - "sleep 60m"
+    volumeMounts:                  # ┐ 把 data 卷
+    - mountPath: /data             # │ 挂载到 /data
+      name: data                   # ┘
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f lke-app.yml
+pod/volpod created
+
+$ kubectl get pvc
+NAME            STATUS   VOLUME                 CAPACITY   ACCESS MODES   STORAGECLASS
+pvc-wait-keep   Bound    pvc-279f09e083254fa9   20Gi       RWO            block-wait-keep
+
+$ kubectl get pv
+NAME                   CAPACITY   ACCESS MODES   RECLAIM POLICY   STATUS   CLAIM           STORAGECLASS
+pvc-279f09e083254fa9   20Gi       RWO            Retain           Bound    pvc-wait-keep   block-wait-keep
+
+$ kubectl describe pod volpod
+...
+    Mounts:
+      /data from data (rw)
+Volumes:
+  data:
+    Type:       PersistentVolumeClaim (a reference to a PVC in the same namespace)
+    ClaimName:  pvc-wait-keep
+    ReadOnly:   false
+</pre>
+</div>
+
+<p>回顾一下刚才发生了什么：</p>
+<ol class="steps">
+  <li>你创建了 StorageClass <code>block-wait-keep</code>，从 Linode 云供应块存储；</li>
+  <li>SC 控制器开始监视引用这个 SC 的新 PVC；</li>
+  <li>你创建了 PVC，但因为是 <code>WaitForFirstConsumer</code>，没有立刻建卷；</li>
+  <li>你部署了一个使用该 PVC 申请 20GB 卷的 Pod；</li>
+  <li>SC 控制器看到后，动态创建了 PV 和 Linode 云上的外部卷。</li>
+</ol>
+
+<h2 id="cleanup">清理（五步，别漏）</h2>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl delete pod volpod                       # 1. 删除使用 PVC 的 Pod
+$ kubectl delete pvc pvc-wait-keep                # 2. 删除 PVC
+$ kubectl delete pv pvc-279f09e083254fa9          # 3. 删除 PV（Retain 策略不会自动删）
+#                                                   4. 到 Linode 控制台 Volumes 页手动删除同名卷
+$ kubectl delete sc block-wait-keep               # 5. 删除 StorageClass
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; Retain 意味着「你来收拾」</div>
+  <p>删掉 Pod 和 PVC 后，PV 和外部卷仍然存在。第 4 步一定要在云控制台删除那个显示为未挂载（unattached）的卷，并确认名字和刚删的 PV 一致，否则会继续产生费用。</p>
+</div>
+
+<h2 id="summary">小结</h2>
+<ul>
+  <li>Kubernetes 有强大的存储子系统，让应用能从各种外部提供方动态申请和使用存储。</li>
+  <li>每个外部提供方都有自己的 CSI 插件，负责创建卷并呈现给 Kubernetes；托管集群通常预装了插件，以 Pod 形式运行在 <code>kube-system</code>。</li>
+  <li>StorageClass 映射到外部系统上的某类存储；SC 控制器以后台调和循环监视新 PVC，创建外部卷并映射成新 PV，Pod 再通过 PVC 挂载。</li>
+  <li>访问模式：RWO / RWM / ROM；回收策略：Delete（默认，危险）/ Retain（安全，需手动回收）。</li>
+  <li><code>WaitForFirstConsumer</code> 实现拓扑感知供应，保证卷和 Pod 在同一可用区。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>运行 <code>kubectl get sc</code>，找出你集群的默认 StorageClass，并用 <code>kubectl describe sc</code> 查看它的回收策略和绑定模式。</li>
+    <li>在 <code>volpod</code> 里执行 <code>kubectl exec -it volpod -- bash -c "echo hello &gt; /data/a.txt"</code>，删掉 Pod 后用同一个 PVC 重新部署，看看文件还在不在。</li>
+    <li>思考：为什么块存储通常不支持 ReadWriteMany？如果多个 Pod 需要共享写同一份数据，你会选哪种存储？</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

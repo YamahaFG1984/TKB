@@ -1,0 +1,488 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 13 章 · API 安全与 RBAC — Kubernetes 入门实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="13">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 13 章</span>
+<h1>API 安全与 RBAC</h1>
+<p class="lede">
+  Kubernetes 以 API 为中心，所有操作都要经过 API 服务器。这一章跟随一个典型的 API 请求，
+  看它如何依次通过<strong>认证（authN）</strong>、<strong>授权（authZ）</strong>和<strong>准入控制（admission control）</strong>三道关卡。
+  重点是 Kubernetes 最常用的授权模块——<strong>RBAC</strong>。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>画出一个 API 请求经过的安全检查流程</li>
+    <li>理解 Kubernetes 认证可插拔、没有内置用户数据库</li>
+    <li>掌握 RBAC 的四个对象：Role、RoleBinding、ClusterRole、ClusterRoleBinding</li>
+    <li>会写 <code>rules</code>：verbs、apiGroups、resources，以及它们与 HTTP 方法的对应</li>
+    <li>拆解 Docker Desktop 如何让你成为集群管理员</li>
+    <li>分清变更型（mutating）和验证型（validating）准入控制器</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="big-picture">全局视图</h2>
+
+<p>下面这些都会向 API 服务器发出 CRUD（创建、读取、更新、删除）请求：使用 kubectl 的运维和开发者、Pod、kubelet、控制平面服务、Kubernetes 原生应用。无论请求从哪里来，流程都一样：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="API 请求依次经过 TLS、认证、授权、准入控制">
+  <rect class="bx" x="10" y="80" width="100" height="64" rx="10"/>
+  <text class="lbl" x="60" y="106" text-anchor="middle">kubectl</text>
+  <text class="sm" x="60" y="126" text-anchor="middle">grant-ward</text>
+
+  <rect class="bx-b" x="150" y="70" width="130" height="84" rx="12"/>
+  <text class="ttl on-b" x="215" y="96" text-anchor="middle">认证 authN</text>
+  <text class="sm" x="215" y="118" text-anchor="middle">你真的是</text>
+  <text class="sm" x="215" y="136" text-anchor="middle">grant-ward 吗？</text>
+
+  <rect class="bx-p" x="310" y="70" width="140" height="84" rx="12"/>
+  <text class="ttl on-p" x="380" y="96" text-anchor="middle">授权 authZ</text>
+  <text class="sm" x="380" y="118" text-anchor="middle">能在 terran 里</text>
+  <text class="sm" x="380" y="136" text-anchor="middle">创建 Deployment 吗？</text>
+
+  <rect class="bx-a" x="480" y="70" width="140" height="84" rx="12"/>
+  <text class="ttl on-a" x="550" y="96" text-anchor="middle">准入控制</text>
+  <text class="sm" x="550" y="118" text-anchor="middle">对象符合</text>
+  <text class="sm" x="550" y="136" text-anchor="middle">策略要求吗？</text>
+
+  <rect class="bx-g" x="650" y="80" width="100" height="64" rx="10"/>
+  <text class="lbl on-g" x="700" y="106" text-anchor="middle">执行</text>
+  <text class="sm" x="700" y="126" text-anchor="middle">写入 etcd</text>
+
+  <path class="ln" d="M112 112 H146" marker-end="url(#ar)"/>
+  <text class="sm" x="129" y="102" text-anchor="middle">TLS</text>
+  <path class="ln" d="M282 112 H306" marker-end="url(#ar)"/>
+  <path class="ln" d="M452 112 H476" marker-end="url(#ar)"/>
+  <path class="ln" d="M622 112 H646" marker-end="url(#ar)"/>
+
+  <path class="ln-r" d="M215 156 V196" marker-end="url(#ar-r)"/>
+  <text class="sm on-r" x="215" y="214" text-anchor="middle">401 Unauthorized</text>
+  <path class="ln-r" d="M380 156 V196" marker-end="url(#ar-r)"/>
+  <text class="sm on-r" x="380" y="214" text-anchor="middle">403 Forbidden</text>
+  <path class="ln-r" d="M550 156 V196" marker-end="url(#ar-r)"/>
+  <text class="sm on-r" x="550" y="214" text-anchor="middle">拒绝</text>
+  <text class="sm" x="380" y="40" text-anchor="middle">三道关卡任何一道不过，请求都会被立即拒绝</text>
+</svg>
+<figcaption>图 13-1　API 请求的安全检查流程</figcaption>
+</figure>
+
+<div class="box note">
+  <div class="t">&#9992; 乘飞机的比喻</div>
+  <p>
+    到机场后先出示护照证明身份（<strong>认证</strong>）；系统查你是否买了这趟航班的座位（<strong>授权</strong>）；
+    然后安检再执行航空公司的规定，比如限制手提行李、禁止携带酒和武器（<strong>准入控制</strong>）。全部通过后，你才能坐下起飞。
+  </p>
+</div>
+
+<h2 id="authn">认证（authN）</h2>
+
+<p>
+  认证就是<strong>证明你是谁</strong>，简写 authN（读作 “auth en”）。所有发往 API 服务器的请求都带有凭据，认证层负责验证它们，失败就返回 <strong>HTTP 401</strong>。
+</p>
+
+<ul>
+  <li>认证层是<strong>可插拔</strong>的：客户端证书、webhook、对接 Active Directory、云 IAM 等都很常见；</li>
+  <li><strong>Kubernetes 没有内置的用户数据库</strong>，它强制你使用外部系统，避免再造一个身份孤岛；</li>
+  <li>开箱即用时大多数集群支持客户端证书，但生产环境应该对接云或企业的身份管理系统。很多托管服务会自动对接底层云的 IAM。</li>
+</ul>
+
+<h3>查看当前的认证配置</h3>
+<p>第 3 章讲过的 kubeconfig 文件就是认证凭据所在：</p>
+
+<div class="code" data-lang="yaml" data-file="~/.kube/config">
+<pre>
+apiVersion: v1
+kind: Config
+clusters:                        # 定义一个或多个集群及其证书
+- cluster:
+    server: https://&lt;API 服务器地址&gt;:443          # 集群的 URL
+    certificate-authority-data: LS0tLS1C...LS0tCg==   # 集群 CA 的公钥
+  name: prod-shield              # 名为 prod-shield 的集群
+users:                           # 定义一个或多个用户及凭据
+- name: njfury                   # 名为 njfury 的用户
+  user:
+    as-user-extra: {}
+    token: eyJhbGciOiJSUzI1NiIsImtpZCI6IlZwMzl...SZY3uUQ   # 用户的凭据
+contexts:                        # context = 集群 + 用户
+- context:
+    cluster: prod-shield         # 发往这个集群
+    user: njfury                 # 以这个用户身份认证
+    namespace: default
+  name: shield-admin
+current-context: shield-admin    # kubectl 使用的 context
+</pre>
+</div>
+
+<p>
+  用户的令牌通常是由集群 CA（或集群信任的 CA）签发的 X.509 证书。集群的认证模块负责判断请求是否真的来自 njfury；如果对接了外部 IAM，就交给那个系统去判断。
+</p>
+
+<h2 id="rbac">授权（authZ）：RBAC</h2>
+
+<p>
+  授权紧跟在认证之后，简写 authZ（读作 “auth zee”）。授权也是可插拔的，一个集群可以同时运行多个授权模块——只要<strong>任一模块</strong>批准，就跳过其余模块直接进入准入控制。
+  最常用的模块是 <strong>RBAC（Role-Based Access Control，基于角色的访问控制）</strong>，它关乎三件事：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 170" role="img" aria-label="RBAC 关心谁可以对什么资源执行什么动作">
+  <rect class="bx-b" x="40" y="30" width="180" height="70" rx="12"/>
+  <text class="ttl on-b" x="130" y="58" text-anchor="middle">用户（subject）</text>
+  <text class="sm" x="130" y="82" text-anchor="middle">Bao / Kalila / Josh</text>
+  <rect class="bx-a" x="290" y="30" width="180" height="70" rx="12"/>
+  <text class="ttl on-a" x="380" y="58" text-anchor="middle">动作（verb）</text>
+  <text class="sm" x="380" y="82" text-anchor="middle">create / list / delete</text>
+  <rect class="bx-g" x="540" y="30" width="180" height="70" rx="12"/>
+  <text class="ttl on-g" x="630" y="58" text-anchor="middle">资源（resource）</text>
+  <text class="sm" x="630" y="82" text-anchor="middle">Pods / Deployments …</text>
+  <path class="ln" d="M222 65 H286" marker-end="url(#ar)"/>
+  <path class="ln" d="M472 65 H536" marker-end="url(#ar)"/>
+  <text class="sm" x="380" y="134" text-anchor="middle">「哪些用户」可以对「哪些资源」执行「哪些动作」</text>
+  <text class="sm" x="380" y="154" text-anchor="middle">例：Bao 可以 create Pods；Kalila 可以 list Deployments；Josh 可以 delete ServiceAccounts</text>
+</svg>
+<figcaption>图 13-2　RBAC 的三要素</figcaption>
+</figure>
+
+<div class="box key">
+  <div class="t">&#9733; 默认拒绝，只有允许规则</div>
+  <p>
+    RBAC 是<strong>最小权限、默认拒绝</strong>的系统：一切都先锁死，你需要创建「允许」规则来逐步打开。
+    Kubernetes <strong>不支持拒绝规则</strong>，只支持允许规则——这看似小事，却让实现和排错简单得多。
+  </p>
+</div>
+
+<h3>Role 与 RoleBinding</h3>
+<p><strong>Role</strong> 定义一组权限，<strong>RoleBinding</strong> 把它绑定给用户。只定义 Role 什么也不会发生，必须绑定才生效。</p>
+
+<div class="vs">
+  <div class="new">
+    <div class="h">Role：定义权限</div>
+    <div class="code" data-lang="yaml">
+<pre>
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: shield
+  name: read-deployments
+rules:
+- verbs: ["get", "watch", "list"]  # 允许的动作
+  apiGroups: ["apps"]              # ┐ 针对这类
+  resources: ["deployments"]       # ┘ 资源
+</pre>
+    </div>
+  </div>
+  <div class="new">
+    <div class="h">RoleBinding：授予用户</div>
+    <div class="code" data-lang="yaml">
+<pre>
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: read-deployments
+  namespace: shield
+subjects:
+- kind: User
+  name: sky                  # 已认证用户的名字
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: read-deployments     # 把这个 Role 绑给上面的用户
+  apiGroup: rbac.authorization.k8s.io
+</pre>
+    </div>
+  </div>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 170" role="img" aria-label="RoleBinding 把用户和 Role 连接起来">
+  <rect class="bx-b" x="20" y="40" width="160" height="70" rx="12"/>
+  <text class="ttl on-b" x="100" y="68" text-anchor="middle">用户 sky</text>
+  <text class="sm" x="100" y="90" text-anchor="middle">（已通过认证）</text>
+  <rect class="bx-a" x="290" y="40" width="180" height="70" rx="12"/>
+  <text class="ttl on-a" x="380" y="68" text-anchor="middle">RoleBinding</text>
+  <text class="mono sm" x="380" y="90" text-anchor="middle">read-deployments</text>
+  <rect class="bx-p" x="580" y="40" width="160" height="70" rx="12"/>
+  <text class="ttl on-p" x="660" y="64" text-anchor="middle">Role</text>
+  <text class="sm" x="660" y="84" text-anchor="middle">get/watch/list</text>
+  <text class="sm" x="660" y="100" text-anchor="middle">deployments</text>
+  <path class="ln" d="M182 75 H286" marker-start="url(#ar)"/><text class="mono sm" x="234" y="66" text-anchor="middle">subjects</text>
+  <path class="ln" d="M472 75 H576" marker-end="url(#ar)"/><text class="mono sm" x="524" y="66" text-anchor="middle">roleRef</text>
+  <rect class="bx-g" x="200" y="128" width="360" height="32" rx="8"/>
+  <text class="mono sm on-g" x="380" y="149" text-anchor="middle">结果：sky 可以 kubectl get deployments -n shield</text>
+</svg>
+<figcaption>图 13-3　RoleBinding = 「谁」+「哪个 Role」；subjects 里的用户名必须与已认证用户一致</figcaption>
+</figure>
+
+<h3>细看 rules</h3>
+
+<p><code>rules</code> 由三个属性组成：<code>verbs</code>（允许的动作）、<code>apiGroups</code> 和 <code>resources</code>（动作作用于哪些对象）。</p>
+
+<div class="tw">
+<table>
+  <tr><th>apiGroup</th><th>resource</th><th>Kubernetes API 路径</th></tr>
+  <tr><td><code>""</code></td><td>pods</td><td><code>/api/v1/namespaces/{namespace}/pods</code></td></tr>
+  <tr><td><code>""</code></td><td>secrets</td><td><code>/api/v1/namespaces/{namespace}/secrets</code></td></tr>
+  <tr><td><code>"storage.k8s.io"</code></td><td>storageclass</td><td><code>/apis/storage.k8s.io/v1/storageclasses</code></td></tr>
+  <tr><td><code>"apps"</code></td><td>deployments</td><td><code>/apis/apps/v1/namespaces/{namespace}/deployments</code></td></tr>
+</table>
+</div>
+
+<p>空字符串 <code>""</code> 表示<strong>核心 API 组</strong>，其他组要写成带双引号的字符串。Kubernetes 的动词和 HTTP 方法一一对应，体现了 API 的 REST 本质：</p>
+
+<div class="tw">
+<table>
+  <tr><th>Kubernetes 动词</th><th>HTTP 方法</th><th>常见响应</th></tr>
+  <tr><td><code>create</code></td><td>POST</td><td>201 Created，403 Access Denied</td></tr>
+  <tr><td><code>get</code>、<code>list</code>、<code>watch</code></td><td>GET</td><td>200 OK，403 Access Denied</td></tr>
+  <tr><td><code>update</code></td><td>PUT</td><td>200 OK，403 Access Denied</td></tr>
+  <tr><td><code>patch</code></td><td>PATCH</td><td>200 OK，403 Access Denied</td></tr>
+  <tr><td><code>delete</code></td><td>DELETE</td><td>200 OK，403 Access Denied</td></tr>
+</table>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl api-resources --sort-by name -o wide
+NAME          APIGROUP   KIND         VERBS
+deployments   apps       Deployment   [create delete ... get list patch update watch]
+pods                     Pod          [create delete ... get list patch update watch]
+secrets                  Secret       [create delete ... get list patch update watch]
+services                 Service      [create delete get list patch update watch]
+</pre>
+</div>
+
+<p>星号 <code>*</code> 代表全部。下面这个 Role 允许对所有 API 组的所有资源做所有动作——仅作演示，<strong>别这么写</strong>：</p>
+
+<div class="code" data-lang="yaml">
+<pre>
+rules:
+- verbs: ["*"]         # 所有动作
+  resources: ["*"]     # 所有资源
+  apiGroups: ["*"]     # 所有 API 组
+</pre>
+</div>
+
+<h3>集群级：ClusterRole 与 ClusterRoleBinding</h3>
+
+<div class="tw">
+<table>
+  <tr><th></th><th>定义权限</th><th>授予权限</th></tr>
+  <tr><td><strong>命名空间级</strong></td><td>Role</td><td>RoleBinding</td></tr>
+  <tr><td><strong>集群级</strong>（作用于所有 Namespace）</td><td>ClusterRole</td><td>ClusterRoleBinding</td></tr>
+</table>
+</div>
+
+<p>它们在同一个 API 子组里，YAML 结构几乎一样。一个很强大的模式是：<strong>用 ClusterRole 在集群级定义一次角色，再用多个 RoleBinding 把它绑到具体的 Namespace</strong>。</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="一个 ClusterRole 通过两个 RoleBinding 应用到两个 Namespace">
+  <rect class="bx-p" x="270" y="14" width="220" height="60" rx="12"/>
+  <text class="ttl on-p" x="380" y="38" text-anchor="middle">ClusterRole</text>
+  <text class="mono sm" x="380" y="60" text-anchor="middle">read-deployments（定义一次）</text>
+
+  <rect class="bx-b" x="40" y="110" width="300" height="104" rx="12"/>
+  <text class="ttl on-b" x="56" y="204">Namespace：shield</text>
+  <rect class="bx-a" x="60" y="126" width="130" height="50" rx="8"/>
+  <text class="sm on-a" x="125" y="148" text-anchor="middle">RoleBinding</text>
+  <text class="sm" x="125" y="166" text-anchor="middle">→ 用户 sky</text>
+
+  <rect class="bx-g" x="420" y="110" width="300" height="104" rx="12"/>
+  <text class="ttl on-g" x="436" y="204">Namespace：hydra</text>
+  <rect class="bx-a" x="440" y="126" width="130" height="50" rx="8"/>
+  <text class="sm on-a" x="505" y="148" text-anchor="middle">RoleBinding</text>
+  <text class="sm" x="505" y="166" text-anchor="middle">→ 用户 daisy</text>
+
+  <path class="ln-p" d="M320 76 L140 124" marker-end="url(#ar)"/>
+  <path class="ln-p" d="M440 76 L520 124" marker-end="url(#ar)"/>
+  <text class="sm" x="210" y="156">权限只在本 NS 生效</text>
+  <text class="sm" x="590" y="156">权限只在本 NS 生效</text>
+</svg>
+<figcaption>图 13-4　ClusterRole + RoleBinding：定义一次，到处复用</figcaption>
+</figure>
+
+<div class="code" data-lang="yaml">
+<pre>
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole              # 集群级角色
+metadata:
+  name: read-deployments       # 注意：没有 metadata.namespace
+rules:
+- verbs: ["get", "watch", "list"]
+  apiGroups: ["apps"]
+  resources: ["deployments"]
+</pre>
+</div>
+
+<h2 id="real-world">真实案例：Docker Desktop 如何让你成为管理员</h2>
+
+<p>大多数集群都预建了一些角色和绑定。下面以 Docker Desktop 多节点集群为例，拆解它如何通过 ClusterRole 和 ClusterRoleBinding 给你集群管理员权限（其他集群做法略有不同，但原理类似）。</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl config view
+users:
+- name: docker-desktop                       # 只是个友好名字
+  user:
+    client-certificate-data: DATA+OMITTED    # 真正的用户名藏在这个证书里
+    client-key-data: DATA+OMITTED
+</pre>
+</div>
+
+<p>用下面这串命令把证书里的用户名和组解出来（需要类 Linux 系统和 <code>jq</code>，并确保当前 context 是 Docker Desktop）：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl config view --raw -o json \
+  | jq ".users[] | select(.name==\"docker-desktop\")" \
+  | jq -r '.user["client-certificate-data"]' \
+  | base64 -d | openssl x509 -text | grep "Subject:"
+        Subject: O=kubeadm:cluster-admins, CN=kubernetes-admin
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 客户端证书怎么编码身份</div>
+  <p>用户名放在 <strong>CN</strong>（Common Name），所属组放在 <strong>O</strong>（Organization）。证书由集群 CA 签发，所以一定能通过认证。</p>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl describe clusterrole cluster-admin
+Name:         cluster-admin
+PolicyRule:
+  Resources  Non-Resource URLs  Resource Names  Verbs
+  ---------  -----------------  --------------  -----
+  *.*        []                 []              [*]
+             [*]                []              [*]
+
+$ kubectl get clusterrolebindings | grep cluster-admin
+cluster-admin                ClusterRole/cluster-admin
+kubeadm:cluster-admins       ClusterRole/cluster-admin
+
+$ kubectl describe clusterrolebindings kubeadm:cluster-admins
+Name:         kubeadm:cluster-admins
+Role:
+  Kind:  ClusterRole
+  Name:  cluster-admin
+Subjects:
+  Kind   Name
+  ----   ----
+  Group  kubeadm:cluster-admins
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="从 kubeconfig 证书到 cluster-admin 权限的映射">
+  <rect class="bx" x="20" y="30" width="200" height="120" rx="12"/>
+  <text class="ttl" x="120" y="56" text-anchor="middle">kubeconfig 客户端证书</text>
+  <text class="mono sm" x="36" y="84">CN=kubernetes-admin</text>
+  <text class="mono sm on-b" x="36" y="106">O=kubeadm:cluster-admins</text>
+  <text class="sm" x="120" y="134" text-anchor="middle">由集群 CA 签发 → 认证通过</text>
+
+  <rect class="bx-a" x="280" y="30" width="200" height="120" rx="12"/>
+  <text class="ttl on-a" x="380" y="56" text-anchor="middle">ClusterRoleBinding</text>
+  <text class="mono sm" x="380" y="80" text-anchor="middle">kubeadm:cluster-admins</text>
+  <text class="sm" x="296" y="108">Subjects：Group</text>
+  <text class="mono sm on-b" x="296" y="128">kubeadm:cluster-admins</text>
+
+  <rect class="bx-r" x="540" y="30" width="200" height="120" rx="12"/>
+  <text class="ttl on-r" x="640" y="56" text-anchor="middle">ClusterRole</text>
+  <text class="mono sm" x="640" y="80" text-anchor="middle">cluster-admin</text>
+  <text class="mono sm" x="640" y="108" text-anchor="middle">*.*  verbs [*]</text>
+  <text class="sm on-r" x="640" y="132" text-anchor="middle">所有 NS 的所有对象</text>
+
+  <path class="ln-b" d="M222 100 H276" marker-end="url(#ar-b)"/>
+  <text class="sm on-b" x="249" y="92" text-anchor="middle">组匹配</text>
+  <path class="ln" d="M482 90 H536" marker-end="url(#ar)"/>
+  <text class="sm" x="509" y="82" text-anchor="middle">roleRef</text>
+
+  <rect class="bx-d" x="20" y="176" width="720" height="44" rx="10"/>
+  <text class="sm" x="380" y="196" text-anchor="middle">kubectl 以 kubernetes-admin 身份认证，它属于 kubeadm:cluster-admins 组，</text>
+  <text class="sm" x="380" y="213" text-anchor="middle">该组被绑定到 cluster-admin，于是你拥有了相当于 root 的权限 —— 强大而危险</text>
+</svg>
+<figcaption>图 13-5　从 kubeconfig 用户到集群管理员的映射链</figcaption>
+</figure>
+
+<h2 id="admission">准入控制</h2>
+
+<p>准入控制在认证和授权都成功之后立即运行，它关乎<strong>策略</strong>。Kubernetes 支持两类准入控制器：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="变更型与验证型准入控制器处理缺少标签的对象">
+  <rect class="bx" x="20" y="90" width="150" height="64" rx="12"/>
+  <text class="lbl" x="95" y="116" text-anchor="middle">新对象</text>
+  <text class="sm on-r" x="95" y="136" text-anchor="middle">缺少 env=prod 标签</text>
+
+  <rect class="bx-a" x="230" y="20" width="230" height="96" rx="12"/>
+  <text class="ttl on-a" x="345" y="44" text-anchor="middle">① 变更型（mutating）</text>
+  <text class="sm" x="345" y="68" text-anchor="middle">检查合规，并且<tspan class="on-a">可以修改</tspan>请求</text>
+  <text class="sm on-g" x="345" y="94" text-anchor="middle">→ 自动补上 env=prod 标签 ✓</text>
+
+  <rect class="bx-p" x="230" y="134" width="230" height="96" rx="12"/>
+  <text class="ttl on-p" x="345" y="158" text-anchor="middle">② 验证型（validating）</text>
+  <text class="sm" x="345" y="182" text-anchor="middle">检查合规，但<tspan class="on-p">不能修改</tspan>请求</text>
+  <text class="sm on-r" x="345" y="208" text-anchor="middle">→ 没有标签就拒绝 ✗</text>
+
+  <rect class="bx-d" x="520" y="40" width="220" height="164" rx="12"/>
+  <text class="ttl" x="630" y="66" text-anchor="middle">规则</text>
+  <text class="sm" x="536" y="94">· 总是先跑变更型，再跑验证型</text>
+  <text class="sm" x="536" y="118">· 只作用于修改集群的请求，</text>
+  <text class="sm" x="536" y="136">　读请求不经过准入控制</text>
+  <text class="sm" x="536" y="160">· 任何一个控制器拒绝，</text>
+  <text class="sm" x="536" y="178">　请求立即被拒，不再检查后面的</text>
+
+  <path class="ln" d="M172 112 L226 70" marker-end="url(#ar)"/>
+  <path class="ln" d="M345 118 V130" marker-end="url(#ar)"/>
+</svg>
+<figcaption>图 13-6　例：生产集群要求所有对象都有 env=prod 标签</figcaption>
+</figure>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl describe pod kube-apiserver-desktop-control-plane \
+  --namespace kube-system | grep admission
+      --enable-admission-plugins=NodeRestriction
+</pre>
+</div>
+
+<p>
+  Docker Desktop 集群只启用了 <code>NodeRestriction</code>。真实的生产集群会运行多得多的准入控制器，例如 <code>AlwaysPullImages</code>（变更型）会把所有新 Pod 的
+  <code>spec.containers.imagePullPolicy</code> 设为 <code>Always</code>，强制每个节点都从镜像仓库拉取镜像、不使用本地缓存——这要求所有节点都有拉取镜像的有效凭据。
+</p>
+
+<h2 id="summary">小结</h2>
+<ul>
+  <li>所有发往 API 服务器的请求都带有凭据，并且必须依次通过<strong>认证、授权、准入控制</strong>；客户端与 API 服务器之间用 TLS 加密。</li>
+  <li>认证层验证身份，可插拔；大多数集群支持客户端证书，但生产环境应使用企业级 IAM。Kubernetes 没有内置用户库。</li>
+  <li>授权层检查已认证的请求是否有权执行操作，最常用的是 RBAC：默认拒绝、只有允许规则，由 Role / RoleBinding / ClusterRole / ClusterRoleBinding 四个对象组成。</li>
+  <li>准入控制在授权之后执行策略：验证型不合规就拒绝，变更型可以修改请求使其合规。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>用 <code>kubectl auth can-i create deployments -n shield</code> 和 <code>kubectl auth can-i '*' '*'</code> 看看你当前的身份有哪些权限。</li>
+    <li>创建 <code>shield</code> Namespace，部署本章的 <code>read-deployments</code> Role 和 RoleBinding，然后用 <code>kubectl auth can-i list deployments -n shield --as sky</code> 验证 sky 的权限；再试试 <code>delete</code>。</li>
+    <li>运行 <code>kubectl get clusterroles</code>，找到 <code>view</code>、<code>edit</code>、<code>admin</code> 这几个内置 ClusterRole，用 <code>kubectl describe</code> 比较它们的区别。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

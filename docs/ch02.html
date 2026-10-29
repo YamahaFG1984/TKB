@@ -1,0 +1,633 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 2 章 · Kubernetes 工作原理 — Kubernetes 入门实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="2">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 2 章</span>
+<h1>Kubernetes 工作原理</h1>
+<p class="lede">
+  这一章是全书的地图。我们会认识集群里的每一个主要部件，搞懂 Kubernetes 最核心的思想——
+  <strong>声明式模型与期望状态</strong>，并初次见到 Pod、Deployment 和 Service 这三个后面天天打交道的对象。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>区分<strong>控制平面节点</strong>和<strong>工作节点</strong>，说出各自运行哪些组件</li>
+    <li>理解 API 服务器、etcd、调度器、控制器、kubelet、kube-proxy 分别干什么</li>
+    <li>理解为什么 etcd 要用奇数个副本（脑裂问题）</li>
+    <li>掌握<strong>期望状态 / 观测状态 / 调和</strong>这三个概念</li>
+    <li>知道应用要怎样层层「包装」才能跑在 Kubernetes 上</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="big-picture">从万米高空看 Kubernetes</h2>
+
+<p>Kubernetes 同时是两样东西：</p>
+<ul>
+  <li><strong>一个集群</strong>：由一个或多个<em>节点（node）</em>组成，为应用提供 CPU、内存等资源；</li>
+  <li><strong>一个编排器</strong>：把应用智能地部署到节点上，坏了修、忙了扩、要更新就滚动发布。</li>
+</ul>
+
+<p>集群里有两种节点：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="一个由三个控制平面节点和三个工作节点组成的集群">
+  <rect class="bx-d" x="10" y="10" width="740" height="270" rx="14"/>
+  <text class="sm" x="26" y="32">Kubernetes 集群</text>
+
+  <rect class="bx-a" x="30" y="44" width="700" height="96" rx="10"/>
+  <text class="ttl on-a" x="46" y="66">控制平面（大脑）—— 生产环境建议 3 或 5 个节点</text>
+  <rect class="bx" x="50" y="78" width="200" height="50" rx="8"/>
+  <text class="lbl" x="150" y="100" text-anchor="middle">控制平面节点 1</text>
+  <text class="sm" x="150" y="118" text-anchor="middle">API · 调度器 · 控制器 · etcd</text>
+  <rect class="bx" x="280" y="78" width="200" height="50" rx="8"/>
+  <text class="lbl" x="380" y="100" text-anchor="middle">控制平面节点 2</text>
+  <text class="sm" x="380" y="118" text-anchor="middle">API · 调度器 · 控制器 · etcd</text>
+  <rect class="bx" x="510" y="78" width="200" height="50" rx="8"/>
+  <text class="lbl" x="610" y="100" text-anchor="middle">控制平面节点 3</text>
+  <text class="sm" x="610" y="118" text-anchor="middle">API · 调度器 · 控制器 · etcd</text>
+
+  <path class="ln-d" d="M380 142 V160" marker-end="url(#ar)"/>
+  <text class="sm" x="390" y="156">下发任务 / 汇报状态</text>
+
+  <rect class="bx-g" x="30" y="164" width="700" height="104" rx="10"/>
+  <text class="ttl on-g" x="46" y="186">工作节点（干活的）—— 运行你的业务应用</text>
+  <rect class="bx" x="50" y="198" width="200" height="56" rx="8"/>
+  <text class="lbl" x="150" y="220" text-anchor="middle">工作节点 1（Linux）</text>
+  <text class="sm" x="150" y="240" text-anchor="middle">kubelet · 运行时 · kube-proxy</text>
+  <rect class="bx" x="280" y="198" width="200" height="56" rx="8"/>
+  <text class="lbl" x="380" y="220" text-anchor="middle">工作节点 2（Linux）</text>
+  <text class="sm" x="380" y="240" text-anchor="middle">kubelet · 运行时 · kube-proxy</text>
+  <rect class="bx" x="510" y="198" width="200" height="56" rx="8"/>
+  <text class="lbl" x="610" y="220" text-anchor="middle">工作节点 3（Windows）</text>
+  <text class="sm" x="610" y="240" text-anchor="middle">kubelet · 运行时 · kube-proxy</text>
+</svg>
+<figcaption>图 2-1　三个控制平面节点 + 三个工作节点的集群</figcaption>
+</figure>
+
+<div class="tw">
+<table>
+  <tr><th></th><th>控制平面节点</th><th>工作节点</th></tr>
+  <tr><td>职责</td><td>实现 Kubernetes 的「智能」：暴露 API、调度、自愈、扩缩、发布……</td><td>运行你的业务应用</td></tr>
+  <tr><td>操作系统</td><td><strong>必须是 Linux</strong></td><td>Linux 或 Windows（一个集群可以混用）</td></tr>
+  <tr><td>数量</td><td>至少 1 个；生产环境 3 或 5 个以实现高可用（HA）</td><td>按业务需要</td></tr>
+  <tr><td>形态</td><td colspan="2">物理机、虚拟机、云主机都行；ARM 和 x86-64 都支持</td></tr>
+</table>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 控制平面上能跑业务吗？</div>
+  <p>
+    开发、测试环境里很常见。但生产环境通常<strong>只让业务跑在工作节点上</strong>，让控制平面节点把资源专心用在管理集群上。
+  </p>
+</div>
+
+<h2 id="control-plane">控制平面：集群的大脑</h2>
+
+<p>
+  控制平面是一组系统服务。最简单的集群只有一个控制平面节点，适合实验；生产集群应该运行 3 或 5 个，并<strong>分散到不同可用区</strong>。
+  通常<strong>每个控制平面节点都运行全部控制平面服务</strong>，这样任何一个挂了都不影响大局。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="控制平面节点内部的组件">
+  <rect class="bx-a" x="20" y="14" width="720" height="272" rx="14"/>
+  <text class="ttl on-a" x="40" y="38">控制平面节点</text>
+
+  <rect class="bx-b" x="250" y="54" width="260" height="56" rx="10"/>
+  <text class="ttl on-b" x="380" y="78" text-anchor="middle">API 服务器（kube-apiserver）</text>
+  <text class="sm" x="380" y="98" text-anchor="middle">唯一入口：HTTPS + REST，认证、授权</text>
+
+  <rect class="bx" x="40" y="150" width="200" height="60" rx="10"/>
+  <text class="ttl" x="140" y="174" text-anchor="middle">调度器</text>
+  <text class="sm" x="140" y="194" text-anchor="middle">给新任务挑选合适的节点</text>
+
+  <rect class="bx" x="280" y="150" width="200" height="60" rx="10"/>
+  <text class="ttl" x="380" y="174" text-anchor="middle">控制器管理器</text>
+  <text class="sm" x="380" y="194" text-anchor="middle">Deployment / ReplicaSet … 控制器</text>
+
+  <rect class="bx" x="520" y="150" width="200" height="60" rx="10"/>
+  <text class="ttl" x="620" y="174" text-anchor="middle">云控制器管理器</text>
+  <text class="sm" x="620" y="194" text-anchor="middle">对接云的负载均衡、存储等</text>
+
+  <rect class="bx-g" x="250" y="232" width="260" height="44" rx="10"/>
+  <text class="ttl on-g" x="380" y="259" text-anchor="middle">集群存储 etcd（唯一有状态的部分）</text>
+
+  <path class="ln-b" d="M300 112 L160 148" marker-end="url(#ar-b)"/>
+  <path class="ln-b" d="M380 112 V148" marker-end="url(#ar-b)"/>
+  <path class="ln-b" d="M460 112 L600 148" marker-end="url(#ar-b)"/>
+  <path class="ln-b" d="M512 72 H728 V254 H514" marker-end="url(#ar-b)"/>
+  <text class="sm on-b" x="716" y="250" text-anchor="end">只有 API 服务器读写 etcd</text>
+  <text class="sm" x="40" y="134">所有组件都通过 API 服务器通信</text>
+</svg>
+<figcaption>图 2-2　控制平面节点上的主要服务</figcaption>
+</figure>
+
+<h3>API 服务器：一切请求的前门</h3>
+<p>
+  API 服务器是 Kubernetes 的前端，<strong>所有命令和请求都要经过它</strong>，连控制平面内部的服务之间也通过它通信。
+  它通过 HTTPS 暴露 RESTful API，每个请求都要经过认证和授权。部署或更新一个应用的过程是这样的：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 150" role="img" aria-label="部署应用的五个步骤">
+  <rect class="bx" x="10" y="40" width="130" height="64" rx="10"/>
+  <text class="ttl" x="75" y="66" text-anchor="middle">① 写 YAML</text>
+  <text class="sm" x="75" y="88" text-anchor="middle">描述应用</text>
+  <rect class="bx-b" x="162" y="40" width="130" height="64" rx="10"/>
+  <text class="ttl on-b" x="227" y="66" text-anchor="middle">② 提交</text>
+  <text class="sm" x="227" y="88" text-anchor="middle">kubectl → API</text>
+  <rect class="bx-p" x="314" y="40" width="130" height="64" rx="10"/>
+  <text class="ttl on-p" x="379" y="66" text-anchor="middle">③ 认证授权</text>
+  <text class="sm" x="379" y="88" text-anchor="middle">你是谁？能做吗？</text>
+  <rect class="bx-g" x="466" y="40" width="130" height="64" rx="10"/>
+  <text class="ttl on-g" x="531" y="66" text-anchor="middle">④ 持久化</text>
+  <text class="sm" x="531" y="88" text-anchor="middle">写入 etcd</text>
+  <rect class="bx-a" x="618" y="40" width="130" height="64" rx="10"/>
+  <text class="ttl on-a" x="683" y="66" text-anchor="middle">⑤ 调度</text>
+  <text class="sm" x="683" y="88" text-anchor="middle">容器分配到节点</text>
+  <path class="ln" d="M142 72 H158" marker-end="url(#ar)"/>
+  <path class="ln" d="M294 72 H310" marker-end="url(#ar)"/>
+  <path class="ln" d="M446 72 H462" marker-end="url(#ar)"/>
+  <path class="ln" d="M598 72 H614" marker-end="url(#ar)"/>
+  <text class="sm" x="380" y="132" text-anchor="middle">这五步是理解 Kubernetes 的一条主线，后面章节会反复出现</text>
+</svg>
+<figcaption>图 2-3　一次部署请求的旅程</figcaption>
+</figure>
+
+<h3>集群存储（etcd）</h3>
+<p>
+  集群存储保存着<strong>所有应用和集群组件的期望状态</strong>，是控制平面里<strong>唯一有状态</strong>的部分。
+  它基于分布式数据库 <strong>etcd</strong>，大多数集群在每个控制平面节点上跑一个 etcd 副本；变化特别频繁的大集群可能会单独部署一个 etcd 集群以获得更好性能。
+</p>
+
+<div class="box warn">
+  <div class="t">&#9888; 高可用 ≠ 备份</div>
+  <p>etcd 有多个副本只能防止「某台机器挂了」，防不了「误删了数据」——误删会被同步到所有副本。你仍然需要真正的备份与恢复方案。</p>
+</div>
+
+<h4>为什么副本数要是奇数？——脑裂问题</h4>
+<p>
+  当网络出故障把副本分成两半、彼此联系不上时，每一边都要判断自己是不是<strong>多数派（quorum）</strong>。只有多数派才能继续写入。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="四节点与三节点 etcd 在网络分区时的表现">
+  <rect class="bx-r" x="20" y="16" width="350" height="220" rx="12"/>
+  <text class="ttl on-r" x="195" y="40" text-anchor="middle">集群 A：4 个副本（偶数）</text>
+  <circle cx="90" cy="100" r="26" fill="var(--panel)" stroke="var(--line-2)" stroke-width="1.5"/><text class="lbl" x="90" y="105" text-anchor="middle">A</text>
+  <circle cx="150" cy="150" r="26" fill="var(--panel)" stroke="var(--line-2)" stroke-width="1.5"/><text class="lbl" x="150" y="155" text-anchor="middle">B</text>
+  <circle cx="240" cy="100" r="26" fill="var(--panel)" stroke="var(--line-2)" stroke-width="1.5"/><text class="lbl" x="240" y="105" text-anchor="middle">C</text>
+  <circle cx="300" cy="150" r="26" fill="var(--panel)" stroke="var(--line-2)" stroke-width="1.5"/><text class="lbl" x="300" y="155" text-anchor="middle">D</text>
+  <path class="ln-r" d="M195 60 V190" stroke-dasharray="6 5"/>
+  <text class="sm" x="120" y="200" text-anchor="middle">2 票 / 4：不是多数</text>
+  <text class="sm" x="270" y="200" text-anchor="middle">2 票 / 4：不是多数</text>
+  <text class="sm on-r" x="195" y="224" text-anchor="middle">脑裂！两边都不敢写 → etcd 只读</text>
+
+  <rect class="bx-g" x="390" y="16" width="350" height="220" rx="12"/>
+  <text class="ttl on-g" x="565" y="40" text-anchor="middle">集群 B：3 个副本（奇数）</text>
+  <circle cx="460" cy="125" r="26" fill="var(--panel)" stroke="var(--line-2)" stroke-width="1.5"/><text class="lbl" x="460" y="130" text-anchor="middle">A</text>
+  <circle cx="620" cy="95" r="26" fill="var(--green-bg)" stroke="var(--green)" stroke-width="1.5"/><text class="lbl" x="620" y="100" text-anchor="middle">B</text>
+  <circle cx="680" cy="155" r="26" fill="var(--green-bg)" stroke="var(--green)" stroke-width="1.5"/><text class="lbl" x="680" y="160" text-anchor="middle">C</text>
+  <path class="ln-r" d="M535 60 V190" stroke-dasharray="6 5"/>
+  <text class="sm" x="462" y="200" text-anchor="middle">1 票 / 3：知道自己是少数</text>
+  <text class="sm" x="650" y="200" text-anchor="middle">2 票 / 3：多数派</text>
+  <text class="sm on-g" x="565" y="224" text-anchor="middle">B、C 继续正常工作</text>
+</svg>
+<figcaption>图 2-4　奇数个副本时，网络分区后总有一边能拿到多数</figcaption>
+</figure>
+
+<p>
+  一旦发生脑裂，etcd 会进入<strong>只读模式</strong>：已经在跑的业务应用照常工作，但 Kubernetes 没法再扩缩或更新它们。
+  etcd 用 <strong>RAFT 共识算法</strong>保证多个来源同时写入时数据不会损坏。
+</p>
+
+<h3>控制器与控制器管理器</h3>
+<p>
+  Kubernetes 的大部分智能由<span class="term">控制器（controller）</span>实现，比如 Deployment 控制器、StatefulSet 控制器、ReplicaSet 控制器。
+  它们都以<strong>后台监视循环（watch loop）</strong>的形式运行，不停地<strong>把观测状态调和成期望状态</strong>。
+  用大白话说：你要 3 个副本，控制器就保证有 3 个健康的副本，不够就补，多了就删。
+  <strong>控制器管理器</strong>负责启动和管理这些控制器。
+</p>
+
+<h3>调度器</h3>
+<p>调度器监视 API 服务器上的新任务，并把它们分配给健康的工作节点：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="调度器先过滤再打分">
+  <rect class="bx-b" x="20" y="80" width="120" height="60" rx="10"/>
+  <text class="ttl on-b" x="80" y="106" text-anchor="middle">新 Pod</text>
+  <text class="sm" x="80" y="126" text-anchor="middle">需要 2 核 / 1G</text>
+
+  <rect class="bx" x="180" y="16" width="250" height="200" rx="10"/>
+  <text class="ttl" x="305" y="38" text-anchor="middle">① 过滤：谁「能」跑？</text>
+  <rect class="bx-r" x="196" y="52" width="218" height="30" rx="6"/><text class="sm" x="305" y="72" text-anchor="middle">节点 1：内存不够 ✗</text>
+  <rect class="bx-r" x="196" y="90" width="218" height="30" rx="6"/><text class="sm" x="305" y="110" text-anchor="middle">节点 2：有污点（taint）✗</text>
+  <rect class="bx-g" x="196" y="128" width="218" height="30" rx="6"/><text class="sm" x="305" y="148" text-anchor="middle">节点 3：满足 ✓</text>
+  <rect class="bx-g" x="196" y="166" width="218" height="30" rx="6"/><text class="sm" x="305" y="186" text-anchor="middle">节点 4：满足 ✓</text>
+
+  <rect class="bx" x="470" y="16" width="270" height="200" rx="10"/>
+  <text class="ttl" x="605" y="38" text-anchor="middle">② 打分：谁「最适合」？</text>
+  <text class="sm" x="486" y="66">已有所需镜像？空闲 CPU / 内存多少？</text>
+  <text class="sm" x="486" y="84">当前已经跑了多少任务？</text>
+  <rect class="bx-a" x="486" y="104" width="238" height="36" rx="6"/><text class="lbl on-a" x="605" y="127" text-anchor="middle">节点 3：87 分 → 选中</text>
+  <rect class="bx" x="486" y="148" width="238" height="36" rx="6"/><text class="lbl" x="605" y="171" text-anchor="middle">节点 4：64 分</text>
+  <text class="sm" x="486" y="204">都不行？Pod 标记为 Pending</text>
+
+  <path class="ln-b" d="M142 110 H176" marker-end="url(#ar-b)"/>
+  <path class="ln" d="M432 158 H466" marker-end="url(#ar)"/>
+</svg>
+<figcaption>图 2-5　调度 = 先过滤掉不能跑的节点，再给剩下的节点打分</figcaption>
+</figure>
+
+<p>
+  过滤时会检查<em>污点（taint）</em>、亲和性与反亲和性规则、网络端口是否可用、CPU 和内存是否充足。
+  如果找不到合适节点，任务会被标记为 <code>Pending</code>；如果集群开启了节点自动扩缩，这个 Pending 任务会触发扩容，新节点加入后调度器再把任务分过去。
+</p>
+
+<h3>云控制器管理器</h3>
+<p>
+  如果集群运行在 AWS、Azure、GCP、Civo 这类公有云上，它会运行一个<strong>云控制器管理器</strong>，把集群和云服务（云主机、负载均衡器、存储）打通。
+  比如应用申请一个负载均衡器，它就会去云上真的创建一个，并接到你的应用上。
+</p>
+
+<h2 id="workers">工作节点：真正干活的地方</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="工作节点内部的组件">
+  <rect class="bx-g" x="20" y="14" width="720" height="222" rx="14"/>
+  <text class="ttl on-g" x="40" y="38">工作节点</text>
+
+  <rect class="bx-a" x="40" y="56" width="200" height="70" rx="10"/>
+  <text class="ttl on-a" x="140" y="82" text-anchor="middle">kubelet</text>
+  <text class="sm" x="140" y="102" text-anchor="middle">节点上的 Kubernetes 代理</text>
+  <text class="sm" x="140" y="118" text-anchor="middle">盯着 API 服务器要活干</text>
+
+  <rect class="bx-b" x="40" y="150" width="200" height="70" rx="10"/>
+  <text class="ttl on-b" x="140" y="176" text-anchor="middle">容器运行时</text>
+  <text class="sm" x="140" y="196" text-anchor="middle">containerd / CRI-O …</text>
+  <text class="sm" x="140" y="212" text-anchor="middle">拉镜像、启停容器</text>
+
+  <rect class="bx-p" x="520" y="56" width="200" height="70" rx="10"/>
+  <text class="ttl on-p" x="620" y="82" text-anchor="middle">kube-proxy</text>
+  <text class="sm" x="620" y="102" text-anchor="middle">实现集群网络</text>
+  <text class="sm" x="620" y="118" text-anchor="middle">把流量负载均衡到 Pod</text>
+
+  <rect class="bx" x="280" y="150" width="440" height="70" rx="10"/>
+  <text class="lbl" x="300" y="172">Pod（你的应用）</text>
+  <rect class="bx-g" x="300" y="182" width="90" height="28" rx="6"/><text class="sm" x="345" y="201" text-anchor="middle">web</text>
+  <rect class="bx-g" x="400" y="182" width="90" height="28" rx="6"/><text class="sm" x="445" y="201" text-anchor="middle">web</text>
+  <rect class="bx-g" x="500" y="182" width="90" height="28" rx="6"/><text class="sm" x="545" y="201" text-anchor="middle">cart</text>
+  <rect class="bx-g" x="600" y="182" width="100" height="28" rx="6"/><text class="sm" x="650" y="201" text-anchor="middle">auth</text>
+
+  <path class="ln-a" d="M140 128 V146" marker-end="url(#ar-a)"/>
+  <path class="ln" d="M242 185 H276" marker-end="url(#ar)"/>
+  <path class="ln" d="M620 128 V146" marker-end="url(#ar)"/>
+  <path class="ln-d" d="M242 90 H516"/>
+  <text class="sm" x="380" y="84" text-anchor="middle">↑ 向控制平面汇报状态</text>
+</svg>
+<figcaption>图 2-6　工作节点的三大组件</figcaption>
+</figure>
+
+<div class="cards">
+  <div class="card"><span class="ic">&#129302;</span><h4>kubelet</h4><p>主代理。监视 API 服务器上的新任务 → 交给运行时执行 → 把状态汇报回去。任务跑不起来时也只汇报，由控制平面决定怎么办。</p></div>
+  <div class="card"><span class="ic">&#128230;</span><h4>运行时</h4><p>大多数新集群预装 containerd。负责拉取镜像、启动停止容器。OpenShift 用 CRI-O。Docker 运行时已不再支持。</p></div>
+  <div class="card"><span class="ic">&#128256;</span><h4>kube-proxy</h4><p>每个节点都跑一个，负责集群网络，并把流量负载均衡到本节点上的任务。</p></div>
+</div>
+
+<h2 id="packaging">为 Kubernetes 打包应用</h2>
+
+<p>
+  Kubernetes 能运行容器、虚拟机、Wasm 应用等等，但<strong>它们都必须先包进 Pod 才能运行</strong>。
+  书里用了一个快递的比喻：
+</p>
+
+<div class="box note">
+  <div class="t">&#128230; 快递比喻</div>
+  <p>
+    快递公司能寄书、衣服、食品、电器……只要你用它认可的<strong>包装和面单</strong>。打包好交给快递员后，
+    用哪架飞机、哪辆卡车、在哪个中转站交接，全是快递公司的事；它还提供查件、改地址、签收证明等服务。
+  </p>
+  <p>
+    Kubernetes 也一样：只要你把应用<strong>包进 Pod</strong>，它就负责选节点、接网络、挂存储这些复杂物流。
+    而保价、冷链、加急这类<strong>增值服务</strong>，就对应 Kubernetes 的<strong>控制器</strong>（比如 Deployment 提供自愈和扩缩）。
+  </p>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 260" role="img" aria-label="Deployment 包 Pod，Pod 包容器，容器包应用">
+  <rect class="bx-a" x="20" y="14" width="440" height="230" rx="14"/>
+  <text class="ttl on-a" x="40" y="40">Deployment</text>
+  <rect class="bx-b" x="50" y="56" width="380" height="172" rx="12"/>
+  <text class="ttl on-b" x="70" y="82">Pod</text>
+  <rect class="bx-g" x="80" y="98" width="320" height="114" rx="10"/>
+  <text class="ttl on-g" x="100" y="122">容器</text>
+  <rect class="bx" x="110" y="138" width="260" height="58" rx="8"/>
+  <text class="ttl" x="240" y="164" text-anchor="middle">你的应用代码</text>
+  <text class="sm" x="240" y="184" text-anchor="middle">Node.js / Go / Java …</text>
+
+  <text class="ttl" x="490" y="40">每一层都在添加点什么</text>
+  <text class="lbl on-g" x="490" y="80">容器：</text>
+  <text class="sm" x="540" y="80">包住应用，提供依赖</text>
+  <text class="lbl on-b" x="490" y="120">Pod：</text>
+  <text class="sm" x="540" y="120">包住容器，让它能在 K8s 上跑</text>
+  <text class="lbl on-a" x="490" y="160">Deployment：</text>
+  <text class="sm" x="490" y="180">包住 Pod，加上自愈、扩缩、</text>
+  <text class="sm" x="490" y="198">滚动更新、版本回滚</text>
+  <text class="sm" x="490" y="232">你把 Deployment 的 YAML 交给</text>
+  <text class="sm" x="490" y="250">API 服务器，K8s 负责实现它</text>
+</svg>
+<figcaption>图 2-7　对象的层层嵌套</figcaption>
+</figure>
+
+<p>对应的 YAML 大概长这样（现在只是混个眼熟，第 6 章会逐行讲解）：</p>
+
+<div class="code" data-lang="yaml" data-file="deployments/deploy.yml（节选）">
+<pre>
+kind: Deployment          # 最外层：Deployment
+spec:
+  replicas: 10            # 要 10 个副本
+  template:               # ↓ 下面是 Pod 模板
+    spec:
+      containers:         # ↓ Pod 里的容器
+      - name: hello-pod
+        image: nigelpoulton/k8sbook:1.0   # 容器里装的应用
+        ports:
+        - containerPort: 8080
+</pre>
+</div>
+
+<h2 id="declarative">声明式模型与期望状态</h2>
+
+<p>这是 Kubernetes 最核心的思想，建立在三个概念之上：</p>
+
+<div class="cards">
+  <div class="card"><span class="ic">&#127919;</span><h4>期望状态</h4><p>你<strong>想要</strong>什么：用哪个镜像、几个副本、哪些端口……</p></div>
+  <div class="card"><span class="ic">&#128269;</span><h4>观测状态</h4><p>你<strong>实际有</strong>什么。也叫实际状态、当前状态，都是一个意思。</p></div>
+  <div class="card"><span class="ic">&#128260;</span><h4>调和</h4><p>让观测状态<strong>持续</strong>和期望状态保持一致的过程。</p></div>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="声明式模型的调和循环">
+  <rect class="bx" x="20" y="30" width="150" height="56" rx="10"/>
+  <text class="ttl" x="95" y="54" text-anchor="middle">① 写 YAML</text>
+  <text class="sm" x="95" y="74" text-anchor="middle">replicas: 10</text>
+  <path class="ln" d="M172 58 H206" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="210" y="30" width="150" height="56" rx="10"/>
+  <text class="ttl on-b" x="285" y="54" text-anchor="middle">② kubectl apply</text>
+  <text class="sm" x="285" y="74" text-anchor="middle">提交给 API 服务器</text>
+  <path class="ln" d="M362 58 H396" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="400" y="30" width="150" height="56" rx="10"/>
+  <text class="ttl on-g" x="475" y="54" text-anchor="middle">③ 存入 etcd</text>
+  <text class="sm" x="475" y="74" text-anchor="middle">作为「意图记录」</text>
+
+  <rect class="bx-a" x="250" y="130" width="260" height="140" rx="70"/>
+  <text class="ttl on-a" x="380" y="160" text-anchor="middle">控制器的调和循环</text>
+  <text class="sm" x="380" y="186" text-anchor="middle">期望：10 个副本</text>
+  <text class="sm" x="380" y="206" text-anchor="middle">观测：8 个（有节点挂了）</text>
+  <text class="sm on-a" x="380" y="230" text-anchor="middle">→ 不一致！再起 2 个</text>
+  <text class="sm" x="380" y="250" text-anchor="middle">然后继续盯着……</text>
+  <path class="ln-a" d="M475 88 C 475 110, 450 120, 440 128" marker-end="url(#ar-a)"/>
+
+  <rect class="bx-r" x="20" y="170" width="190" height="60" rx="10"/>
+  <text class="ttl on-r" x="115" y="196" text-anchor="middle">节点故障</text>
+  <text class="sm" x="115" y="216" text-anchor="middle">两个副本没了</text>
+  <path class="ln-r" d="M212 200 H246" marker-end="url(#ar-r)"/>
+
+  <rect class="bx-g" x="550" y="170" width="190" height="60" rx="10"/>
+  <text class="ttl on-g" x="645" y="196" text-anchor="middle">回到 10 个副本</text>
+  <text class="sm" x="645" y="216" text-anchor="middle">观测 = 期望 ✓</text>
+  <path class="ln-g" d="M512 200 H546" marker-end="url(#ar-g)"/>
+</svg>
+<figcaption>图 2-8　调和：控制器永远在后台比较「想要的」和「实际的」</figcaption>
+</figure>
+
+<ol class="steps">
+  <li>在 YAML 清单文件里描述应用的期望状态</li>
+  <li>把 YAML 提交给 API 服务器（最常用 <code>kubectl</code> 命令行工具），经过认证和授权</li>
+  <li>Kubernetes 把它作为<strong>意图记录（record of intent）</strong>存进集群存储</li>
+  <li>某个控制器发现观测状态和新的期望状态不一致</li>
+  <li>控制器进行必要的变更来消除差异：调度 Pod、拉镜像、启动容器、接入网络……</li>
+  <li>控制器继续在后台运行，确保观测状态<strong>永远</strong>和期望状态一致</li>
+</ol>
+
+<h3>声明式 vs 命令式</h3>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">命令式：告诉系统「怎么做」</div>
+    <div class="code" data-lang="bash">
+<pre>
+# 一步一步来，每个平台写法都不一样
+for node in node1 node2 node3; do
+  ssh $node "docker pull app:2.0"
+  ssh $node "docker stop app"
+  ssh $node "docker run -d app:2.0"
+  # 还要自己检查健康、处理失败、回滚……
+done
+</pre>
+    </div>
+  </div>
+  <div class="new">
+    <div class="h">声明式：告诉系统「要什么」</div>
+    <div class="code" data-lang="yaml">
+<pre>
+# 只改一行，剩下的交给 Kubernetes
+spec:
+  replicas: 10
+  template:
+    spec:
+      containers:
+      - image: app:2.0   # 原来是 1.0
+</pre>
+    </div>
+  </div>
+</div>
+
+<p>
+  Kubernetes 两种方式都支持，但<strong>更推荐声明式</strong>：YAML 文件可以放进 Git 做版本管理，而且自愈、自动扩缩、滚动更新都建立在声明式之上。
+  比如要升级镜像版本，命令式需要写复杂的脚本来管理、监控、健康检查整个过程；声明式只需改一行 YAML。
+</p>
+
+<h2 id="pods">Pod</h2>
+
+<p>
+  在 VMware 的世界里，调度的原子单位是虚拟机；在 Kubernetes 里，是 <strong>Pod</strong>。
+  最简单的情况是一个 Pod 里只有一个容器，所以我们有时会把 Pod 和容器混着说。但多容器 Pod 也有很强的用途：
+</p>
+<ul>
+  <li>服务网格（service mesh）</li>
+  <li>负责初始化环境的辅助服务</li>
+  <li>和主应用紧密耦合的辅助功能，比如日志采集器</li>
+</ul>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 244" role="img" aria-label="多容器 Pod 共享同一个 IP">
+  <rect class="bx-b" x="120" y="20" width="420" height="190" rx="14"/>
+  <text class="ttl on-b" x="140" y="46">Pod　IP: 10.0.10.15</text>
+  <rect class="bx-g" x="150" y="64" width="160" height="80" rx="10"/>
+  <text class="ttl on-g" x="230" y="92" text-anchor="middle">主应用容器</text>
+  <text class="mono sm" x="230" y="116" text-anchor="middle">:8080</text>
+  <rect class="bx-p" x="350" y="64" width="160" height="80" rx="10"/>
+  <text class="ttl on-p" x="430" y="92" text-anchor="middle">服务网格 sidecar</text>
+  <text class="mono sm" x="430" y="116" text-anchor="middle">:5005</text>
+  <path class="ln-a" d="M312 104 H346" marker-end="url(#ar-a)" marker-start="url(#ar-a)"/>
+  <text class="sm on-a" x="330" y="166" text-anchor="middle">Pod 内部用 localhost 互相访问</text>
+  <text class="sm" x="330" y="190" text-anchor="middle">共享：网络栈、卷、共享内存……</text>
+
+  <text class="mono sm" x="560" y="96">10.0.10.15:8080</text>
+  <text class="mono sm" x="560" y="116">10.0.10.15:5005</text>
+  <text class="sm" x="560" y="140">从 Pod 外部访问</text>
+  <path class="ln" d="M556 92 H520"/>
+
+  <text class="sm" x="330" y="232" text-anchor="middle">sidecar = 和主容器跑在同一个 Pod 里、提供辅助功能的容器</text>
+</svg>
+<figcaption>图 2-9　一个 Pod 是一个共享的执行环境</figcaption>
+</figure>
+
+<p>
+  多容器 Pod 还能帮我们落实<strong>单一职责原则</strong>：主容器只管业务，加密、遥测这类事交给同一个 Pod 里的 sidecar。
+  <strong>只有在组件紧密耦合、需要共享内存或存储时才用多容器 Pod</strong>；其他情况都用单容器 Pod，通过网络松散地连接起来。
+</p>
+
+<h3>关于 Pod 的五条铁律</h3>
+
+<div class="cards">
+  <div class="card"><span class="ic">&#128205;</span><h4>同一 Pod 只在一个节点</h4><p>Kubernetes 调度的是 Pod，不是单个容器。共享内存和网络没法跨节点。</p></div>
+  <div class="card"><span class="ic">&#9878;</span><h4>启动是原子的</h4><p>所有容器都跑起来，Pod 才算 Ready。两个容器只起来一个 = 没准备好。</p></div>
+  <div class="card"><span class="ic">&#128200;</span><h4>扩缩的单位是 Pod</h4><p>扩容是加 Pod，缩容是删 Pod。<strong>不是</strong>往已有的 Pod 里加容器。</p></div>
+  <div class="card"><span class="ic">&#9760;</span><h4>Pod 会死</h4><p>死了就被替换成一个<strong>全新</strong>的 Pod：新 ID、新 IP。所以应用要松耦合。</p></div>
+  <div class="card"><span class="ic">&#129482;</span><h4>Pod 不可变</h4><p>运行中的 Pod 不去修改。「更新 Pod」永远意味着删掉旧的、换上新的。</p></div>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 170" role="img" aria-label="通过增加 Pod 来扩容">
+  <text class="ttl" x="130" y="22" text-anchor="middle">扩容前：web-fe × 1</text>
+  <rect class="bx-b" x="70" y="40" width="120" height="70" rx="10"/>
+  <text class="lbl on-b" x="130" y="70" text-anchor="middle">Pod</text>
+  <text class="sm" x="130" y="90" text-anchor="middle">web-fe 容器</text>
+
+  <path class="ln-a" d="M240 75 H300" marker-end="url(#ar-a)"/>
+  <text class="sm on-a" x="270" y="66" text-anchor="middle">扩容</text>
+
+  <text class="ttl" x="530" y="22" text-anchor="middle">扩容后：web-fe × 3（加 Pod，而不是加容器）</text>
+  <rect class="bx-b" x="330" y="40" width="120" height="70" rx="10"/>
+  <text class="lbl on-b" x="390" y="70" text-anchor="middle">Pod</text><text class="sm" x="390" y="90" text-anchor="middle">web-fe 容器</text>
+  <rect class="bx-b" x="470" y="40" width="120" height="70" rx="10"/>
+  <text class="lbl on-b" x="530" y="70" text-anchor="middle">Pod</text><text class="sm" x="530" y="90" text-anchor="middle">web-fe 容器</text>
+  <rect class="bx-b" x="610" y="40" width="120" height="70" rx="10"/>
+  <text class="lbl on-b" x="670" y="70" text-anchor="middle">Pod</text><text class="sm" x="670" y="90" text-anchor="middle">web-fe 容器</text>
+  <text class="sm" x="530" y="140" text-anchor="middle">新 Pod 可能被调度到不同节点上</text>
+</svg>
+<figcaption>图 2-10　Pod 是扩缩的最小单位</figcaption>
+</figure>
+
+<div class="box key">
+  <div class="t">&#9733; 不可变是一种思维转变</div>
+  <p>
+    永远不要登录进一个 Pod 去改东西。需要更新时，换一个跑着新代码的新 Pod。
+    这对很多运维习惯是很大的转变，但它与现代工具和 GitOps 工作流非常契合：<strong>Git 里的 YAML 就是唯一的事实来源</strong>。
+  </p>
+</div>
+
+<h2 id="deployments">Deployment</h2>
+<p>
+  虽然 Kubernetes 以 Pod 为单位工作，但你几乎总是通过更高层的控制器来部署 Pod，比如
+  <strong>Deployment</strong>、<strong>StatefulSet</strong>、<strong>DaemonSet</strong>。
+  它们都是控制平面上的后台监视循环。<strong>Deployment 为无状态应用提供自愈、扩缩、滚动更新和版本回滚。</strong>
+</p>
+
+<h2 id="services">Service 与稳定的网络</h2>
+
+<p>前面说了 Pod 会死，而且被替换后 IP 会变。不光是故障，下面这些事件也会导致 IP 不停变化（<em>IP churn</em>）：</p>
+<ul>
+  <li>发布新版本：新 Pod 替换旧 Pod，新 IP</li>
+  <li>扩容：新增的 Pod 有新 IP</li>
+  <li>缩容：已有 Pod 被删除</li>
+</ul>
+<p>所以客户端没法可靠地直接连某个 Pod。<strong>Service</strong> 就是来解决这个问题的：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 260" role="img" aria-label="Service 的前端稳定，后端通过标签负载均衡到 Pod">
+  <rect class="bx" x="20" y="40" width="130" height="50" rx="10"/>
+  <text class="lbl" x="85" y="70" text-anchor="middle">集群内客户端</text>
+  <rect class="bx" x="20" y="150" width="130" height="50" rx="10"/>
+  <text class="lbl" x="85" y="180" text-anchor="middle">外部客户端</text>
+
+  <rect class="bx-a" x="200" y="30" width="200" height="190" rx="12"/>
+  <text class="ttl on-a" x="300" y="56" text-anchor="middle">Service</text>
+  <rect class="bx" x="216" y="70" width="168" height="66" rx="8"/>
+  <text class="lbl" x="300" y="90" text-anchor="middle">前端（永远不变）</text>
+  <text class="mono sm" x="300" y="108" text-anchor="middle">名字: web-svc</text>
+  <text class="mono sm" x="300" y="126" text-anchor="middle">10.96.0.20:80</text>
+  <rect class="bx" x="216" y="146" width="168" height="62" rx="8"/>
+  <text class="lbl" x="300" y="168" text-anchor="middle">后端（随 Pod 变化）</text>
+  <text class="mono sm" x="300" y="190" text-anchor="middle">selector: app=web</text>
+
+  <path class="ln" d="M152 65 H196" marker-end="url(#ar)"/>
+  <path class="ln" d="M152 175 H196" marker-end="url(#ar)"/>
+
+  <rect class="bx-g" x="480" y="20" width="160" height="44" rx="8"/>
+  <text class="sm" x="560" y="38" text-anchor="middle">Pod  app=web</text>
+  <text class="mono sm" x="560" y="56" text-anchor="middle">10.1.0.4</text>
+  <rect class="bx-g" x="480" y="76" width="160" height="44" rx="8"/>
+  <text class="sm" x="560" y="94" text-anchor="middle">Pod  app=web</text>
+  <text class="mono sm" x="560" y="112" text-anchor="middle">10.1.2.9</text>
+  <rect class="bx-g" x="480" y="132" width="160" height="44" rx="8"/>
+  <text class="sm" x="560" y="150" text-anchor="middle">Pod  app=web（新）</text>
+  <text class="mono sm" x="560" y="168" text-anchor="middle">10.1.3.7</text>
+  <rect class="bx-r" x="480" y="188" width="160" height="44" rx="8" stroke-dasharray="5 4"/>
+  <text class="sm on-r" x="560" y="206" text-anchor="middle">Pod（已死亡）</text>
+  <text class="mono sm" x="560" y="224" text-anchor="middle">10.1.1.3 ✗</text>
+
+  <path class="ln-g" d="M386 176 L476 42" marker-end="url(#ar-g)"/>
+  <path class="ln-g" d="M386 176 L476 98" marker-end="url(#ar-g)"/>
+  <path class="ln-g" d="M386 176 L476 154" marker-end="url(#ar-g)"/>
+  <text class="sm" x="660" y="110">Service 自动</text>
+  <text class="sm" x="660" y="128">维护健康 Pod</text>
+  <text class="sm" x="660" y="146">的列表</text>
+</svg>
+<figcaption>图 2-11　Service：稳定的前端 + 动态的后端</figcaption>
+</figure>
+
+<p>
+  可以把 Service 想成有<strong>前端</strong>和<strong>后端</strong>：前端有稳定的 DNS 名字、IP 和端口，<strong>永远不会变</strong>；
+  后端通过<strong>标签（label）</strong>在一组动态变化的 Pod 之间做负载均衡，并始终只把流量发给健康的 Pod。
+  （Service 首字母大写，表示它是 Kubernetes 的 API 资源，区别于泛指的「服务」。）
+</p>
+
+<h2 id="summary">小结</h2>
+<ul>
+  <li><strong>控制平面</strong>是大脑：API 服务器（唯一入口）、etcd（唯一有状态的存储）、调度器、控制器管理器、云控制器管理器。生产环境跑 3 或 5 个节点。</li>
+  <li><strong>工作节点</strong>运行业务：kubelet（代理）、运行时（containerd）、kube-proxy（网络）。</li>
+  <li>Kubernetes 偏爱<strong>声明式</strong>：你描述期望状态，控制器不停地把观测状态调和过去。</li>
+  <li>应用要包进 <strong>Pod</strong> 才能运行；Pod 是调度和扩缩的最小单位，会死、不可变。</li>
+  <li><strong>Deployment</strong> 给 Pod 加上自愈、扩缩、滚动更新和回滚；<strong>Service</strong> 给一组 Pod 提供稳定的网络入口。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>不看上面的图，画出一个集群的草图：控制平面节点里有哪些组件？工作节点里有哪些？箭头怎么连？</li>
+    <li>假设 etcd 有 5 个副本，网络分区成 2 + 3。哪一边能继续写入？如果是 6 个副本分成 3 + 3 呢？</li>
+    <li>用「期望状态 / 观测状态 / 调和」解释：你手动删掉一个由 Deployment 管理的 Pod 后，会发生什么？（第 6 章会亲手验证。）</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

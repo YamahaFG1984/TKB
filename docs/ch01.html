@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 1 章 · Kubernetes 入门 — Kubernetes 入门实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="1">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 1 章</span>
+<h1>Kubernetes 入门</h1>
+<p class="lede">
+  「Kubernetes 是一个编排容器化云原生微服务应用的编排器。」——这句话里几乎每个词都是术语。
+  这一章就把它们一个个拆开，再讲讲 Kubernetes 从哪里来、为什么被称为「云的操作系统」。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>用大白话解释<strong>编排、容器化、云原生、微服务</strong>四个词</li>
+    <li>知道 Kubernetes 的来历，以及它和 Google、Docker、Borg 的关系</li>
+    <li>理解 Kubernetes 为什么不再用 Docker 做运行时，而这又为什么<strong>不影响</strong>你用 Docker 打包应用</li>
+    <li>理解「Kubernetes 是云的操作系统」这个比喻</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="jargon">把那句满是术语的话拆开</h2>
+
+<p>官方式的定义是：<em>Kubernetes 是容器化云原生微服务应用的编排器</em>。我们把它拆成四块来看：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="把 Kubernetes 定义拆成四个关键词">
+  <rect class="bx-a" x="20" y="16" width="720" height="44" rx="10"/>
+  <text class="ttl on-a" x="380" y="44" text-anchor="middle">Kubernetes 是「容器化」「云原生」「微服务」应用的「编排器」</text>
+
+  <rect class="bx-b" x="20" y="96" width="168" height="136" rx="10"/>
+  <text class="ttl on-b" x="104" y="122" text-anchor="middle">编排器</text>
+  <text class="sm" x="34" y="148">自动部署应用</text>
+  <text class="sm" x="34" y="168">按需扩容、缩容</text>
+  <text class="sm" x="34" y="188">坏了自动修复</text>
+  <text class="sm" x="34" y="208">滚动更新、回滚</text>
+
+  <rect class="bx-g" x="204" y="96" width="168" height="136" rx="10"/>
+  <text class="ttl on-g" x="288" y="122" text-anchor="middle">容器化</text>
+  <text class="sm" x="218" y="148">把应用 + 依赖</text>
+  <text class="sm" x="218" y="168">打包成镜像</text>
+  <text class="sm" x="218" y="188">再把镜像跑成容器</text>
+  <text class="sm" x="218" y="208">比虚拟机更小更快</text>
+
+  <rect class="bx-p" x="388" y="96" width="168" height="136" rx="10"/>
+  <text class="ttl on-p" x="472" y="122" text-anchor="middle">云原生</text>
+  <text class="sm" x="402" y="148">自带「云的特性」：</text>
+  <text class="sm" x="402" y="168">自动扩缩、自愈</text>
+  <text class="sm" x="402" y="188">自动更新、回滚</text>
+  <text class="sm" x="402" y="208">≠ 只是跑在云上</text>
+
+  <rect class="bx" x="572" y="96" width="168" height="136" rx="10"/>
+  <text class="ttl" x="656" y="122" text-anchor="middle">微服务</text>
+  <text class="sm" x="586" y="148">一个应用拆成</text>
+  <text class="sm" x="586" y="168">许多小而独立的部分</text>
+  <text class="sm" x="586" y="188">各自开发、发布</text>
+  <text class="sm" x="586" y="208">各自扩缩容</text>
+
+  <path class="ln-d" d="M104 62 V92" marker-end="url(#ar)"/>
+  <path class="ln-d" d="M288 62 V92" marker-end="url(#ar)"/>
+  <path class="ln-d" d="M472 62 V92" marker-end="url(#ar)"/>
+  <path class="ln-d" d="M656 62 V92" marker-end="url(#ar)"/>
+</svg>
+<figcaption>图 1-1　一句定义，四个关键词</figcaption>
+</figure>
+
+<h3>编排（Orchestration）</h3>
+<p>
+  <span class="term">编排器</span>是一个负责<strong>部署应用并动态应对变化</strong>的系统。Kubernetes 能够：
+</p>
+<ul>
+  <li>部署应用</li>
+  <li>根据负载自动扩容、缩容</li>
+  <li>东西坏了自动修复（<em>自愈</em>）</li>
+  <li>执行滚动发布（rollout）和回滚（rollback）</li>
+</ul>
+<p>
+  最妙的是，这一切都<strong>不需要你插手</strong>。你只需要在开始时配置好，然后就可以坐下来，让 Kubernetes 施展魔法。
+  就像乐团的指挥：乐手（容器）各自演奏，指挥保证整体和谐。
+</p>
+
+<h3>容器化（Containerization）</h3>
+<p>
+  容器化就是把<strong>应用和它的依赖</strong>打包成<em>镜像（image）</em>，然后把镜像运行成<em>容器（container）</em>的过程。
+  你可以把容器看成「下一代虚拟机」：两者都是打包和运行应用的方式，但容器更小、更快、更容易搬家。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 245" role="img" aria-label="虚拟机与容器的结构对比">
+  <text class="ttl" x="190" y="22" text-anchor="middle">虚拟机</text>
+  <rect class="bx" x="30" y="34" width="100" height="70" rx="6"/>
+  <text class="sm" x="80" y="56" text-anchor="middle">应用 A</text>
+  <rect class="bx-r" x="38" y="66" width="84" height="30" rx="4"/>
+  <text class="sm on-r" x="80" y="86" text-anchor="middle">完整操作系统</text>
+  <rect class="bx" x="140" y="34" width="100" height="70" rx="6"/>
+  <text class="sm" x="190" y="56" text-anchor="middle">应用 B</text>
+  <rect class="bx-r" x="148" y="66" width="84" height="30" rx="4"/>
+  <text class="sm on-r" x="190" y="86" text-anchor="middle">完整操作系统</text>
+  <rect class="bx" x="250" y="34" width="100" height="70" rx="6"/>
+  <text class="sm" x="300" y="56" text-anchor="middle">应用 C</text>
+  <rect class="bx-r" x="258" y="66" width="84" height="30" rx="4"/>
+  <text class="sm on-r" x="300" y="86" text-anchor="middle">完整操作系统</text>
+  <rect class="bx-d" x="30" y="116" width="320" height="34" rx="6"/>
+  <text class="lbl" x="190" y="138" text-anchor="middle">Hypervisor（虚拟化层）</text>
+  <rect class="bx" x="30" y="158" width="320" height="34" rx="6"/>
+  <text class="lbl" x="190" y="180" text-anchor="middle">宿主机操作系统 / 硬件</text>
+  <text class="sm" x="190" y="214" text-anchor="middle">每个 VM 都背着一整个操作系统</text>
+  <text class="sm" x="190" y="232" text-anchor="middle">体积以 GB 计，启动要几十秒到几分钟</text>
+
+  <text class="ttl" x="570" y="22" text-anchor="middle">容器</text>
+  <rect class="bx-g" x="410" y="34" width="100" height="70" rx="6"/>
+  <text class="sm on-g" x="460" y="62" text-anchor="middle">应用 A</text>
+  <text class="sm" x="460" y="82" text-anchor="middle">+ 依赖库</text>
+  <rect class="bx-g" x="520" y="34" width="100" height="70" rx="6"/>
+  <text class="sm on-g" x="570" y="62" text-anchor="middle">应用 B</text>
+  <text class="sm" x="570" y="82" text-anchor="middle">+ 依赖库</text>
+  <rect class="bx-g" x="630" y="34" width="100" height="70" rx="6"/>
+  <text class="sm on-g" x="680" y="62" text-anchor="middle">应用 C</text>
+  <text class="sm" x="680" y="82" text-anchor="middle">+ 依赖库</text>
+  <rect class="bx-b" x="410" y="116" width="320" height="34" rx="6"/>
+  <text class="lbl on-b" x="570" y="138" text-anchor="middle">容器运行时（containerd 等）</text>
+  <rect class="bx" x="410" y="158" width="320" height="34" rx="6"/>
+  <text class="lbl" x="570" y="180" text-anchor="middle">共享的宿主机内核 / 硬件</text>
+  <text class="sm" x="570" y="214" text-anchor="middle">所有容器共享宿主机内核</text>
+  <text class="sm" x="570" y="232" text-anchor="middle">体积以 MB 计，启动以秒甚至毫秒计</text>
+</svg>
+<figcaption>图 1-2　容器不需要各自背一个操作系统，所以更轻</figcaption>
+</figure>
+
+<div class="box note">
+  <div class="t">&#9432; 容器并没有完全取代虚拟机</div>
+  <p>
+    在大多数环境里你会看到容器和虚拟机<strong>并肩运行</strong>——甚至 Kubernetes 的节点本身常常就是虚拟机。
+    但对<em>新</em>应用来说，容器已经是首选。
+  </p>
+</div>
+
+<h3>云原生（Cloud native）</h3>
+<p>
+  云原生应用具备「云一样的特性」：<strong>自动扩缩、自愈、自动更新、可回滚</strong>等。
+  注意：<strong>把一个普通应用搬到公有云上跑，并不会让它变成云原生</strong>。云原生是应用的<em>能力</em>，不是它所在的<em>地点</em>。
+</p>
+
+<h3>微服务（Microservices）</h3>
+<p>
+  微服务应用由许多<strong>小的、专门的、独立的</strong>部分组成，它们协同工作形成一个完整应用。
+  以一个电商应用为例，它有六个功能：网页前端、商品目录、购物车、身份认证、日志、商店。
+  把它做成微服务，就是把这六个功能<strong>各自当成一个小应用</strong>去设计、开发、部署和管理。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 260" role="img" aria-label="电商应用拆分成六个微服务，每个服务独立扩缩容">
+  <text class="ttl" x="380" y="22" text-anchor="middle">一个电商应用 = 六个微服务，每个都跑成若干个容器</text>
+
+  <rect class="bx-a" x="20" y="40" width="112" height="170" rx="10"/>
+  <text class="ttl on-a" x="76" y="64" text-anchor="middle">网页前端</text>
+  <rect class="bx" x="34" y="76" width="84" height="26" rx="5"/><text class="sm" x="76" y="94" text-anchor="middle">容器</text>
+  <rect class="bx" x="34" y="108" width="84" height="26" rx="5"/><text class="sm" x="76" y="126" text-anchor="middle">容器</text>
+  <rect class="bx" x="34" y="140" width="84" height="26" rx="5"/><text class="sm" x="76" y="158" text-anchor="middle">容器</text>
+  <rect class="bx" x="34" y="172" width="84" height="26" rx="5"/><text class="sm" x="76" y="190" text-anchor="middle">容器</text>
+
+  <rect class="bx-b" x="144" y="40" width="112" height="170" rx="10"/>
+  <text class="ttl on-b" x="200" y="64" text-anchor="middle">商品目录</text>
+  <rect class="bx" x="158" y="76" width="84" height="26" rx="5"/><text class="sm" x="200" y="94" text-anchor="middle">容器</text>
+  <rect class="bx" x="158" y="108" width="84" height="26" rx="5"/><text class="sm" x="200" y="126" text-anchor="middle">容器</text>
+
+  <rect class="bx-g" x="268" y="40" width="112" height="170" rx="10"/>
+  <text class="ttl on-g" x="324" y="64" text-anchor="middle">购物车</text>
+  <rect class="bx" x="282" y="76" width="84" height="26" rx="5"/><text class="sm" x="324" y="94" text-anchor="middle">容器</text>
+  <rect class="bx" x="282" y="108" width="84" height="26" rx="5"/><text class="sm" x="324" y="126" text-anchor="middle">容器</text>
+  <rect class="bx" x="282" y="140" width="84" height="26" rx="5"/><text class="sm" x="324" y="158" text-anchor="middle">容器</text>
+
+  <rect class="bx-p" x="392" y="40" width="112" height="170" rx="10"/>
+  <text class="ttl on-p" x="448" y="64" text-anchor="middle">身份认证</text>
+  <rect class="bx" x="406" y="76" width="84" height="26" rx="5"/><text class="sm" x="448" y="94" text-anchor="middle">容器</text>
+  <rect class="bx" x="406" y="108" width="84" height="26" rx="5"/><text class="sm" x="448" y="126" text-anchor="middle">容器</text>
+
+  <rect class="bx" x="516" y="40" width="112" height="170" rx="10"/>
+  <text class="ttl" x="572" y="64" text-anchor="middle">日志</text>
+  <rect class="bx" x="530" y="76" width="84" height="26" rx="5"/><text class="sm" x="572" y="94" text-anchor="middle">容器</text>
+
+  <rect class="bx-r" x="640" y="40" width="100" height="170" rx="10"/>
+  <text class="ttl on-r" x="690" y="64" text-anchor="middle">商店</text>
+  <rect class="bx" x="652" y="76" width="76" height="26" rx="5"/><text class="sm" x="690" y="94" text-anchor="middle">容器</text>
+  <rect class="bx" x="652" y="108" width="76" height="26" rx="5"/><text class="sm" x="690" y="126" text-anchor="middle">容器</text>
+
+  <text class="sm" x="380" y="234" text-anchor="middle">大促时前端压力大？只给「网页前端」多加几个容器即可，其他服务不受影响。</text>
+  <text class="sm" x="380" y="252" text-anchor="middle">每个服务可以有自己的小团队、自己的发布节奏。</text>
+</svg>
+<figcaption>图 1-3　微服务让每个功能都能独立开发、发布和扩缩容</figcaption>
+</figure>
+
+<p>
+  这样设计带来很大的灵活性：每个微服务可以有自己的开发小组和发布周期，还能<strong>独立扩缩容、独立更新</strong>。
+  最常见的做法是<strong>每个微服务部署成自己的容器</strong>，所以扩容某个部分就只是加减几个容器而已。
+</p>
+
+<div class="box key">
+  <div class="t">&#9733; 现在，把那句话翻译成人话</div>
+  <p>
+    「Kubernetes 是容器化云原生微服务应用的编排器」=
+    <strong>Kubernetes 负责部署、扩缩、自愈、更新那些「把每个功能单独打包成容器」的应用。</strong>
+    如果还有点模糊，不用担心，后面每一章都会再详细讲一遍。
+  </p>
+</div>
+
+<h2 id="history">Kubernetes 从哪里来</h2>
+
+<p>Kubernetes 的诞生，部分是 Google 工程师对两件事的回应：<strong>AWS</strong> 和 <strong>Docker</strong>。</p>
+
+<ul>
+  <li><strong>AWS</strong> 发明了现代云计算，整个行业都在追赶。Google 有自己的云，需要一种办法把 AWS 的价值「抽象掉」，让客户能轻松地从 AWS 搬到它的云上。</li>
+  <li><strong>Docker</strong> 正在席卷世界，容器数量爆炸，用户急需一个管理它们的工具。</li>
+  <li>Google 自己的生产业务（搜索、Gmail）每周要跑<strong>数十亿个容器</strong>，积累了大量经验。</li>
+</ul>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 172" role="img" aria-label="Kubernetes 发展时间线">
+  <path class="ln" d="M40 90 H730" />
+  <circle cx="80"  cy="90" r="7" fill="var(--accent)"/>
+  <circle cx="210" cy="90" r="7" fill="var(--blue)"/>
+  <circle cx="350" cy="90" r="7" fill="var(--purple)"/>
+  <circle cx="500" cy="90" r="7" fill="var(--red)"/>
+  <circle cx="660" cy="90" r="7" fill="var(--green)"/>
+
+  <text class="ttl on-a" x="80" y="56" text-anchor="middle">2014</text>
+  <text class="sm" x="80" y="120" text-anchor="middle">Google 开源 Kubernetes</text>
+  <text class="sm" x="80" y="138" text-anchor="middle">捐给新成立的 CNCF</text>
+
+  <text class="ttl on-b" x="210" y="56" text-anchor="middle">2015.07</text>
+  <text class="sm" x="210" y="120" text-anchor="middle">发布 1.0 版本</text>
+  <text class="sm" x="210" y="138" text-anchor="middle">Apache 2.0 许可证</text>
+
+  <text class="ttl on-p" x="350" y="56" text-anchor="middle">2016–2017</text>
+  <text class="sm" x="350" y="120" text-anchor="middle">编排器之战：Swarm、</text>
+  <text class="sm" x="350" y="138" text-anchor="middle">Mesos DCOS 与 K8s</text>
+  <text class="sm on-p" x="350" y="156" text-anchor="middle">Kubernetes 胜出</text>
+
+  <text class="ttl on-r" x="500" y="56" text-anchor="middle">1.24</text>
+  <text class="sm" x="500" y="120" text-anchor="middle">移除 Docker 运行时支持</text>
+  <text class="sm" x="500" y="138" text-anchor="middle">containerd 成为主流</text>
+
+  <text class="ttl on-g" x="660" y="56" text-anchor="middle">1.35（今天）</text>
+  <text class="sm" x="660" y="120" text-anchor="middle">十余岁，每年约 3 个版本</text>
+  <text class="sm" x="660" y="138" text-anchor="middle">云原生的事实标准</text>
+</svg>
+<figcaption>图 1-4　Kubernetes 简史</figcaption>
+</figure>
+
+<p>十多年后，Kubernetes 的核心价值仍然是 Google 和整个行业最需要的两件事：</p>
+<ol>
+  <li><strong>抽象基础设施</strong>（比如 AWS 的各种细节）</li>
+  <li><strong>让应用更容易迁移</strong>（今天在这朵云，明天换另一朵）</li>
+</ol>
+
+<h3>Kubernetes 和 Borg：「抵抗是徒劳的！」</h3>
+<p>
+  Google 内部有两个工具 <strong>Borg</strong> 和 <strong>Omega</strong>，一直在编排它那数十亿个容器。
+  Kubernetes <strong>不是</strong> Borg 或 Omega 的开源版，更像是它们的「亲戚」——共享同样的 DNA 和家族史。
+</p>
+
+<h3>名字里的彩蛋</h3>
+<div class="cards">
+  <div class="card"><span class="ic">&#9096;</span><h4>舵手</h4><p>Kubernetes 来自希腊语「舵手」，就是掌舵的人。所以 logo 是一个船舵。</p></div>
+  <div class="card"><span class="ic">&#128126;</span><h4>七个辐条</h4><p>原本想叫 <em>Seven of Nine</em>（星际迷航里一个著名的 Borg 角色），版权不允许，于是让舵有 7 根辐条致敬。</p></div>
+  <div class="card"><span class="ic">8&#65039;&#8419;</span><h4>K8s</h4><p>K 和 s 之间正好 8 个字母，所以简写成 K8s，读作 “kates”。</p></div>
+  <div class="card"><span class="ic">&#128483;</span><h4>怎么读</h4><p>大多数人读作 “koo-ber-net-eez”。社区很友好，读得不一样也没人介意。</p></div>
+</div>
+
+<h2 id="docker">Kubernetes 和 Docker</h2>
+
+<p>
+  早期所有版本的 Kubernetes 都用 Docker 作为<span class="term">容器运行时（runtime）</span>——也就是负责创建、启动、停止容器的底层工具。后来发生了两件事：
+</p>
+<ol>
+  <li>Docker 变得越来越臃肿，对 Kubernetes 来说功能过剩</li>
+  <li>大家造出了很多 Docker 的替代品</li>
+</ol>
+<p>
+  于是 Kubernetes 项目创建了 <strong>CRI（Container Runtime Interface，容器运行时接口）</strong>，把运行时这一层做成<strong>可插拔</strong>的。
+  Kubernetes 1.24 正式移除了对 Docker 运行时的支持，从那以后大多数新集群默认使用 <strong>containerd</strong>（读作 “container-dee”）。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 246" role="img" aria-label="通过 CRI，同一个集群可以使用多种运行时">
+  <rect class="bx-a" x="20" y="16" width="720" height="40" rx="10"/>
+  <text class="ttl on-a" x="380" y="41" text-anchor="middle">Kubernetes（通过 CRI 接口下达「启动容器」「停止容器」之类的指令）</text>
+
+  <rect class="bx" x="20" y="80" width="168" height="126" rx="10"/>
+  <text class="ttl" x="104" y="104" text-anchor="middle">节点 1</text>
+  <rect class="bx-b" x="36" y="116" width="136" height="34" rx="6"/>
+  <text class="lbl on-b" x="104" y="138" text-anchor="middle">containerd</text>
+
+  <rect class="bx" x="204" y="80" width="168" height="126" rx="10"/>
+  <text class="ttl" x="288" y="104" text-anchor="middle">节点 2</text>
+  <rect class="bx-b" x="220" y="116" width="136" height="34" rx="6"/>
+  <text class="lbl on-b" x="288" y="138" text-anchor="middle">containerd</text>
+  <rect class="bx-p" x="220" y="158" width="136" height="34" rx="6"/>
+  <text class="lbl on-p" x="288" y="180" text-anchor="middle">gVisor（强隔离）</text>
+
+  <rect class="bx" x="388" y="80" width="168" height="126" rx="10"/>
+  <text class="ttl" x="472" y="104" text-anchor="middle">节点 3</text>
+  <rect class="bx-g" x="404" y="116" width="136" height="34" rx="6"/>
+  <text class="lbl on-g" x="472" y="138" text-anchor="middle">CRI-O</text>
+
+  <rect class="bx" x="572" y="80" width="168" height="126" rx="10"/>
+  <text class="ttl" x="656" y="104" text-anchor="middle">节点 4</text>
+  <rect class="bx-b" x="588" y="116" width="136" height="34" rx="6"/>
+  <text class="lbl on-b" x="656" y="138" text-anchor="middle">containerd</text>
+  <rect class="bx-p" x="588" y="158" width="136" height="34" rx="6"/>
+  <text class="lbl on-p" x="656" y="180" text-anchor="middle">Wasm 运行时</text>
+
+  <path class="ln-d" d="M104 58 V78"/><path class="ln-d" d="M288 58 V78"/>
+  <path class="ln-d" d="M472 58 V78"/><path class="ln-d" d="M656 58 V78"/>
+  <text class="sm" x="380" y="232" text-anchor="middle">一个节点上可以同时有多种运行时；Kubernetes 只跟 CRI 打交道，不关心背后是谁</text>
+</svg>
+<figcaption>图 1-5　有了 CRI，运行时可以按需挑选、混合使用</figcaption>
+</figure>
+
+<div class="box tip">
+  <div class="t">&#128161; 那我还能用 Docker 吗？当然能</div>
+  <p>
+    「Kubernetes 不再用 Docker 作运行时」<strong>不等于</strong>「Kubernetes 不能跑 Docker 打包的镜像」。
+    Docker、containerd 和 Kubernetes 都遵循 <strong>OCI（Open Container Initiative，开放容器倡议）</strong>标准，
+    所以你用 <code>docker build</code> 打出来的镜像，containerd 照样能跑。
+    你的开发流程完全不用变：<strong>用 Docker 构建，在 Kubernetes 上运行</strong>。
+  </p>
+</div>
+
+<h3>那 Docker Swarm 呢？</h3>
+<p>
+  2016–2017 年，Docker Swarm、Mesosphere DCOS 和 Kubernetes 争夺容器编排的行业标准，最终 Kubernetes 胜出。
+  不过 Docker Swarm 仍在开发，在想要一个比 Kubernetes 简单的方案的小公司里依然受欢迎。
+</p>
+
+<h2 id="os">Kubernetes：云的操作系统</h2>
+
+<p>
+  我们常把 Kubernetes 称为<strong>云的操作系统</strong>，因为它抽象掉不同云平台之间的差异，就像 Linux、Windows 抽象掉不同服务器之间的差异一样：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 270" role="img" aria-label="操作系统与 Kubernetes 的类比">
+  <text class="ttl" x="190" y="22" text-anchor="middle">传统操作系统（Linux / Windows）</text>
+  <rect class="bx-g" x="30" y="36" width="320" height="44" rx="8"/>
+  <text class="lbl on-g" x="190" y="63" text-anchor="middle">应用进程</text>
+  <rect class="bx-a" x="30" y="96" width="320" height="44" rx="8"/>
+  <text class="ttl on-a" x="190" y="123" text-anchor="middle">操作系统：抽象资源 + 调度进程</text>
+  <rect class="bx" x="30" y="156" width="74" height="40" rx="6"/><text class="sm" x="67" y="181" text-anchor="middle">CPU 核</text>
+  <rect class="bx" x="112" y="156" width="74" height="40" rx="6"/><text class="sm" x="149" y="181" text-anchor="middle">内存条</text>
+  <rect class="bx" x="194" y="156" width="74" height="40" rx="6"/><text class="sm" x="231" y="181" text-anchor="middle">闪存</text>
+  <rect class="bx" x="276" y="156" width="74" height="40" rx="6"/><text class="sm" x="313" y="181" text-anchor="middle">网卡</text>
+  <text class="sm" x="190" y="222" text-anchor="middle">开发者很少关心代码跑在哪个 CPU 核上</text>
+  <path class="ln" d="M190 82 V94"/><path class="ln" d="M190 142 V154"/>
+
+  <text class="ttl" x="570" y="22" text-anchor="middle">Kubernetes</text>
+  <rect class="bx-g" x="410" y="36" width="320" height="44" rx="8"/>
+  <text class="lbl on-g" x="570" y="63" text-anchor="middle">微服务应用</text>
+  <rect class="bx-a" x="410" y="96" width="320" height="44" rx="8"/>
+  <text class="ttl on-a" x="570" y="123" text-anchor="middle">Kubernetes：抽象云资源 + 调度微服务</text>
+  <rect class="bx" x="410" y="156" width="74" height="40" rx="6"/><text class="sm" x="447" y="181" text-anchor="middle">AWS</text>
+  <rect class="bx" x="492" y="156" width="74" height="40" rx="6"/><text class="sm" x="529" y="181" text-anchor="middle">Azure</text>
+  <rect class="bx" x="574" y="156" width="74" height="40" rx="6"/><text class="sm" x="611" y="181" text-anchor="middle">GCP</text>
+  <rect class="bx" x="656" y="156" width="74" height="40" rx="6"/><text class="sm" x="693" y="181" text-anchor="middle">自建机房</text>
+  <text class="sm" x="570" y="222" text-anchor="middle">你也很少需要关心应用跑在哪个节点、哪个可用区</text>
+  <path class="ln" d="M570 82 V94"/><path class="ln" d="M570 142 V154"/>
+
+  <text class="sm on-a" x="380" y="256" text-anchor="middle">一样的思路，换了一个更大的尺度</text>
+</svg>
+<figcaption>图 1-6　操作系统管理一台机器，Kubernetes 管理整片云</figcaption>
+</figure>
+
+<p>
+  你在 Kubernetes 上调度应用时，不必关心它跑在 AWS、Azure、Civo、GCP 还是自家机房。这让 Kubernetes 成为以下场景的关键推手：
+</p>
+<div class="cards">
+  <div class="card"><span class="ic">&#9729;</span><h4>混合云</h4><p>一部分在公有云，一部分在自己机房，用同一套方式管理。</p></div>
+  <div class="card"><span class="ic">&#127760;</span><h4>多云</h4><p>同时用好几家云厂商，不被任何一家绑死。</p></div>
+  <div class="card"><span class="ic">&#128666;</span><h4>云迁移</h4><p>今天部署到一朵云，明天搬到另一朵云。</p></div>
+</div>
+
+<h2 id="summary">小结</h2>
+<ul>
+  <li>Kubernetes 是由 Google 工程师基于多年超大规模运行容器的经验创建的，2014 年开源并捐给 CNCF，使用 Apache 2.0 许可证。</li>
+  <li>它负责<strong>部署、扩缩、自愈、更新</strong>以容器形式打包的微服务应用。</li>
+  <li>运行时通过 CRI 可插拔，主流是 containerd；Docker 构建的镜像遵循 OCI 标准，依然可以直接使用。</li>
+  <li>Kubernetes 抽象了底层基础设施，常被称为「云的操作系统」，是混合云、多云和云迁移的基础。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>挑一个你熟悉的应用（比如外卖 App），试着把它拆成 5～6 个微服务，并想一想：午高峰时哪几个服务最需要扩容？</li>
+    <li>用自己的话向一个不懂技术的朋友解释「声明一个目标，然后让系统自己维持它」和「一步一步下命令」有什么区别。（下一章会正式讲到这个概念。）</li>
+    <li>如果你装了 Docker，运行 <code>docker run --rm hello-world</code>，体会一下「镜像 → 容器」的过程。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

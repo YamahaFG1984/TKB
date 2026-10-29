@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 3 章 · 搭建 Kubernetes 环境 — Kubernetes 入门实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="3">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 3 章</span>
+<h1>搭建 Kubernetes 环境</h1>
+<p class="lede">
+  理论讲完了，该动手了。这一章准备好三样东西：<strong>Docker</strong>、<strong>一个 Kubernetes 集群</strong>和
+  <strong>kubectl 命令行工具</strong>。最后还会讲清楚 kubectl 是怎么知道「该把命令发给哪个集群」的。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>用 Docker Desktop 在笔记本上跑起一个 3 节点的集群</li>
+    <li>知道什么时候需要一个云上集群（Gateway API、存储章节）</li>
+    <li>克隆本书的示例代码仓库</li>
+    <li>理解 kubeconfig 文件里的 clusters、users、contexts 和 current-context</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="options">选哪种集群？</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="本地集群与云上集群的选择">
+  <rect class="bx-a" x="270" y="14" width="220" height="50" rx="10"/>
+  <text class="ttl on-a" x="380" y="45" text-anchor="middle">你的电脑 + kubectl</text>
+
+  <rect class="bx-b" x="20" y="100" width="340" height="136" rx="12"/>
+  <text class="ttl on-b" x="190" y="126" text-anchor="middle">Docker Desktop（推荐日常使用）</text>
+  <text class="sm" x="36" y="152">✓ 一次装好 Docker + 集群 + kubectl</text>
+  <text class="sm" x="36" y="172">✓ 内置多节点集群（kind），免费</text>
+  <text class="sm" x="36" y="192">✓ 适用于本书大部分示例</text>
+  <text class="sm on-r" x="36" y="216">✗ 不适合 Gateway API 和存储章节</text>
+
+  <rect class="bx-g" x="400" y="100" width="340" height="136" rx="12"/>
+  <text class="ttl on-g" x="570" y="126" text-anchor="middle">云上托管集群（如 Akamai LKE）</text>
+  <text class="sm" x="416" y="152">✓ 真实的云负载均衡器和云存储</text>
+  <text class="sm" x="416" y="172">✓ 控制平面由云厂商托管</text>
+  <text class="sm" x="416" y="192">✓ 第 8、10、12 章需要它</text>
+  <text class="sm on-r" x="416" y="216">✗ 要花钱，用完记得删除</text>
+
+  <path class="ln-a" d="M330 66 L220 96" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M430 66 L540 96" marker-end="url(#ar-a)"/>
+</svg>
+<figcaption>图 3-1　推荐组合：日常用 Docker Desktop，需要云能力时再开云集群</figcaption>
+</figure>
+
+<div class="box note">
+  <div class="t">&#9432; 其他本地选择</div>
+  <p>
+    除了 Docker Desktop，作者也常用 <strong>k3d</strong>、<strong>KIND</strong> 和 <strong>minikube</strong> 在笔记本上跑集群。
+    任何一个都可以，只是 Docker Desktop 的优势在于自带全套 Docker 开发工具并自动装好 kubectl。
+  </p>
+</div>
+
+<h2 id="docker-desktop">用 Docker Desktop 一次装好</h2>
+
+<div class="box warn">
+  <div class="t">&#9888; 许可证提示</div>
+  <p>Docker Desktop 对个人和教育用途免费。如果用于工作，且公司员工超过 250 人或年收入超过 1000 万美元，需要购买许可证。</p>
+</div>
+
+<ol class="steps">
+  <li>到 <code>app.docker.com/signup</code> 注册一个免费的个人账号。</li>
+  <li>搜索 Docker Desktop，下载对应系统（Linux / Mac / Windows）的安装包，版本需要 <strong>4.60 或更新</strong>，一路「下一步」安装。Windows 用户在提示时安装 <strong>WSL</strong>（Windows Subsystem for Linux）。</li>
+  <li>启动后，Mac 菜单栏顶部 / Windows 系统托盘里会出现一只<strong>鲸鱼图标</strong>。</li>
+</ol>
+
+<p>打开终端，确认 Docker 和 kubectl 都装好了：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ docker --version
+Docker version 28.3.3, build 309deef
+
+$ kubectl version --client=true -o yaml
+clientVersion:
+  major: "1"
+  minor: "35"
+  platform: darwin/arm64
+</pre>
+</div>
+
+<h3>创建内置的多节点集群</h3>
+<ol class="steps">
+  <li>点击鲸鱼图标并登录，然后打开 <strong>Settings</strong>。</li>
+  <li>在 <strong>General</strong> 标签页里确认勾选了 <em>Use containerd for pulling and storing images</em>，必要时点击 <em>Apply &amp; restart</em>。</li>
+  <li>左侧导航选 <strong>Kubernetes</strong>，点击蓝色的 <strong>Create cluster</strong>，选择 <strong>kind</strong>（另一个选项 kubeadm 只能创建单节点集群）。</li>
+  <li>把 <strong>Node(s)</strong> 滑块拉到 <strong>3</strong>，选择最新版本，勾选 <em>Show system containers (advanced)</em>。</li>
+  <li>点击 <em>Apply &amp; restart</em>，等一两分钟，界面底部出现绿色的 <em>Kubernetes running</em> 就好了。</li>
+</ol>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl get nodes
+NAME                    STATUS   ROLES           AGE   VERSION
+desktop-control-plane   Ready    control-plane   10m   v1.35.1
+desktop-worker          Ready    &lt;none&gt;          10m   v1.35.1
+desktop-worker2         Ready    &lt;none&gt;          10m   v1.35.1
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="Docker Desktop 把集群节点作为容器运行">
+  <rect class="bx" x="20" y="14" width="720" height="200" rx="14"/>
+  <text class="ttl" x="40" y="38">你的笔记本</text>
+  <rect class="bx-b" x="40" y="52" width="680" height="148" rx="12"/>
+  <text class="ttl on-b" x="60" y="76">Docker Desktop</text>
+
+  <rect class="bx-a" x="60" y="92" width="200" height="92" rx="10"/>
+  <text class="ttl on-a" x="160" y="116" text-anchor="middle">容器：</text>
+  <text class="mono sm" x="160" y="136" text-anchor="middle">desktop-control-plane</text>
+  <text class="sm" x="160" y="164" text-anchor="middle">= 控制平面节点</text>
+
+  <rect class="bx-g" x="280" y="92" width="200" height="92" rx="10"/>
+  <text class="ttl on-g" x="380" y="116" text-anchor="middle">容器：</text>
+  <text class="mono sm" x="380" y="136" text-anchor="middle">desktop-worker</text>
+  <text class="sm" x="380" y="164" text-anchor="middle">= 工作节点</text>
+
+  <rect class="bx-g" x="500" y="92" width="200" height="92" rx="10"/>
+  <text class="ttl on-g" x="600" y="116" text-anchor="middle">容器：</text>
+  <text class="mono sm" x="600" y="136" text-anchor="middle">desktop-worker2</text>
+  <text class="sm" x="600" y="164" text-anchor="middle">= 工作节点</text>
+</svg>
+<figcaption>图 3-2　kind 集群的每个「节点」其实是一个容器——但用起来和真实集群一模一样</figcaption>
+</figure>
+
+<p>
+  回到 Docker Desktop 的 <strong>Containers</strong> 标签页，你会看到三个和节点同名的容器。
+  这是因为 Docker Desktop 用容器来模拟节点。别被它绕晕：对你来说，使用体验和真实集群完全一样。
+</p>
+
+<h2 id="lke">在云上建一个集群（Akamai LKE）</h2>
+
+<p>
+  <strong>LKE（Linode Kubernetes Engine）</strong>是 Akamai 云上的托管 Kubernetes 服务：集群由 Akamai 搭建，并负责可用性、性能和升级。
+  这类托管服务是你能得到的「几乎零成本维护的生产级集群」。其他云厂商也有类似服务（EKS、AKS、GKE……），都可以用，
+  只是本书的存储示例是按 Akamai 云存储写的，换云的话要改存储相关的配置文件。
+</p>
+
+<h3>创建集群</h3>
+<p>注册 Akamai 账号（书中提供了新用户 60 天 100 美元额度的推荐链接），然后到 <code>cloud.linode.com</code> → <strong>Kubernetes</strong> → <strong>Create Cluster</strong>，填写：</p>
+
+<div class="tw">
+<table>
+  <tr><th>设置项</th><th>取值</th></tr>
+  <tr><td>Cluster label</td><td><code>tkb</code></td></tr>
+  <tr><td>Region</td><td>选一个离你近的区域</td></tr>
+  <tr><td>Kubernetes Version</td><td>选一个较新的版本</td></tr>
+  <tr><td>Akamai API Platform</td><td>No</td></tr>
+  <tr><td>HA Control Plane</td><td>No（学习用不需要高可用控制平面）</td></tr>
+  <tr><td>Control Plane ACL</td><td>Disabled</td></tr>
+  <tr><td>Node Pools</td><td>Shared CPU 标签页，添加 <strong>3 × Linode 2GB</strong> 节点</td></tr>
+</table>
+</div>
+
+<p>点击 <strong>Create Cluster</strong>，等一两分钟三个节点都变绿，剩下的就是配置 kubectl 连上它。</p>
+
+<div class="box warn">
+  <div class="t">&#9888; 用完记得删集群</div>
+  <p>云集群按时间计费。做完需要它的章节后，到控制台把集群删掉，避免意外扣费。</p>
+</div>
+
+<h2 id="repo">获取本书示例代码</h2>
+
+<p>本书所有的 YAML 文件和示例应用都在 GitHub 仓库里（也就是这个教程所在的仓库）。安装 git 后执行：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ git clone https://github.com/nigelpoulton/TKB.git
+$ cd TKB
+$ git fetch origin
+$ git checkout -b 2026 origin/2026
+</pre>
+</div>
+
+<p>仓库目录和章节的对应关系：</p>
+
+<div class="tw">
+<table>
+  <tr><th>目录</th><th>内容</th><th>用于</th></tr>
+  <tr><td><code>pods/</code></td><td>单容器 Pod、init 容器、原生 sidecar 示例</td><td>第 4 章</td></tr>
+  <tr><td><code>namespaces/</code></td><td><code>shield</code> 命名空间及其中的应用</td><td>第 5 章</td></tr>
+  <tr><td><code>deployments/</code></td><td>10 副本的 Deployment + LoadBalancer Service</td><td>第 6 章</td></tr>
+  <tr><td><code>services/</code></td><td>Service 示例</td><td>第 7 章</td></tr>
+  <tr><td><code>gateway-api/</code></td><td>金丝雀发布、跨命名空间路由</td><td>第 8 章</td></tr>
+  <tr><td><code>service-discovery/</code></td><td>两个命名空间里的同名 Service</td><td>第 9 章</td></tr>
+  <tr><td><code>storage/</code></td><td>StorageClass、PVC 与挂载卷的 Pod</td><td>第 10 章</td></tr>
+  <tr><td><code>configmaps/</code></td><td>ConfigMap、Secret 及各种注入方式</td><td>第 11 章</td></tr>
+  <tr><td><code>statefulsets/</code></td><td>Headless Service、StatefulSet、jump Pod</td><td>第 12 章</td></tr>
+  <tr><td><code>api/</code></td><td>CRD 自定义资源示例</td><td>第 14 章</td></tr>
+  <tr><td><code>psa/</code></td><td>Pod 安全准入示例</td><td>第 16 章</td></tr>
+  <tr><td><code>web-app/</code></td><td>示例 Web 应用的源码和 Dockerfile</td><td>多个章节</td></tr>
+</table>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; Windows 用户注意</div>
+  <p>
+    书中命令过长时会用反斜杠 <code>\</code> 换行。在 Windows PowerShell 里，要么把命令写成一行并去掉反斜杠，
+    要么把反斜杠换成反引号 <code>`</code>。
+  </p>
+</div>
+
+<h2 id="kubectl">kubectl 与 kubeconfig</h2>
+
+<p>
+  <strong>kubectl</strong> 是 Kubernetes 的命令行工具，所有动手示例都要用它。
+  安装的版本应与集群版本<strong>相差不超过一个小版本</strong>：集群是 v1.35.x，kubectl 就应该在 v1.34.x 到 v1.36.x 之间。
+</p>
+
+<h3>每条 kubectl 命令背后发生了什么</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="kubectl 把命令转换成 HTTP 请求发给 API 服务器">
+  <rect class="bx" x="20" y="60" width="170" height="70" rx="10"/>
+  <text class="ttl" x="105" y="88" text-anchor="middle">kubectl get pods</text>
+  <text class="sm" x="105" y="110" text-anchor="middle">你敲的命令</text>
+
+  <rect class="bx-p" x="250" y="20" width="230" height="160" rx="12"/>
+  <text class="ttl on-p" x="365" y="44" text-anchor="middle">读取 ~/.kube/config</text>
+  <text class="sm" x="266" y="72">① 把命令转换成 HTTP REST 请求</text>
+  <text class="mono sm" x="280" y="92">GET /api/v1/namespaces/</text>
+  <text class="mono sm" x="280" y="108">    default/pods</text>
+  <text class="sm" x="266" y="134">② 查 current-context → 发给哪个集群</text>
+  <text class="sm" x="266" y="160">③ 用 context 里的凭据做认证</text>
+
+  <rect class="bx-b" x="540" y="60" width="200" height="70" rx="10"/>
+  <text class="ttl on-b" x="640" y="88" text-anchor="middle">集群的 API 服务器</text>
+  <text class="mono sm" x="640" y="110" text-anchor="middle">https://…:6443</text>
+
+  <path class="ln" d="M192 95 H246" marker-end="url(#ar)"/>
+  <path class="ln-b" d="M482 95 H536" marker-end="url(#ar-b)"/>
+  <text class="sm" x="509" y="86" text-anchor="middle">HTTPS</text>
+</svg>
+<figcaption>图 3-3　kubectl 本质上是一个会读配置文件的 HTTP 客户端</figcaption>
+</figure>
+
+<h3>kubeconfig 文件的结构</h3>
+
+<p>
+  kubeconfig 文件名就叫 <code>config</code>（没有扩展名），放在家目录下的隐藏文件夹 <code>.kube</code> 里：
+  macOS / Linux 是 <code>~/.kube/config</code>，Windows 是 <code>C:\Users\&lt;用户名&gt;\.kube\config</code>。它定义了四样东西：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="kubeconfig 中 context 把 cluster 和 user 组合起来">
+  <rect class="bx-b" x="20" y="20" width="200" height="170" rx="12"/>
+  <text class="ttl on-b" x="120" y="44" text-anchor="middle">clusters（集群）</text>
+  <rect class="bx" x="36" y="60" width="168" height="34" rx="6"/><text class="mono sm" x="120" y="82" text-anchor="middle">shield</text>
+  <rect class="bx" x="36" y="102" width="168" height="34" rx="6"/><text class="mono sm" x="120" y="124" text-anchor="middle">prod</text>
+  <text class="sm" x="120" y="164" text-anchor="middle">API 地址 + CA 证书</text>
+
+  <rect class="bx-g" x="540" y="20" width="200" height="170" rx="12"/>
+  <text class="ttl on-g" x="640" y="44" text-anchor="middle">users（凭据）</text>
+  <rect class="bx" x="556" y="60" width="168" height="34" rx="6"/><text class="mono sm" x="640" y="82" text-anchor="middle">coulson</text>
+  <rect class="bx" x="556" y="102" width="168" height="34" rx="6"/><text class="mono sm" x="640" y="124" text-anchor="middle">ops</text>
+  <text class="sm" x="640" y="164" text-anchor="middle">客户端证书 / 私钥 / token</text>
+
+  <rect class="bx-a" x="270" y="20" width="220" height="170" rx="12"/>
+  <text class="ttl on-a" x="380" y="44" text-anchor="middle">contexts（组合）</text>
+  <rect class="bx" x="286" y="60" width="188" height="46" rx="6"/>
+  <text class="mono sm" x="380" y="78" text-anchor="middle">director</text>
+  <text class="sm" x="380" y="96" text-anchor="middle">shield + coulson</text>
+  <rect class="bx" x="286" y="116" width="188" height="46" rx="6"/>
+  <text class="mono sm" x="380" y="134" text-anchor="middle">ops-prod</text>
+  <text class="sm" x="380" y="152" text-anchor="middle">prod + ops</text>
+
+  <path class="ln" d="M206 77 H282"/><path class="ln" d="M474 77 H554"/>
+  <path class="ln-d" d="M206 119 C240 119 250 139 282 139"/><path class="ln-d" d="M474 139 C510 139 520 119 554 119"/>
+
+  <rect class="bx-r" x="270" y="206" width="220" height="34" rx="8"/>
+  <text class="mono sm on-r" x="380" y="228" text-anchor="middle">current-context: director</text>
+  <path class="ln-r" d="M492 223 H518 V94 H478" marker-end="url(#ar-r)"/>
+</svg>
+<figcaption>图 3-4　context = 「哪个集群」+「以谁的身份」；current-context 决定默认用哪个</figcaption>
+</figure>
+
+<div class="code" data-lang="yaml" data-file="~/.kube/config">
+<pre>
+apiVersion: v1
+kind: Config
+clusters:                       # 所有集群都列在这里
+- name: shield                  # 集群的友好名字
+  cluster:
+    server: https://192.168.1.77:8443        # 集群 API 服务器地址
+    certificate-authority-data: LS0tLS...    # 集群的 CA 证书
+users:                          # 用户凭据列表
+- name: coulson                 # 友好名字（Kubernetes 本身不使用）
+  user:
+    client-certificate-data: LS0tLS1CRU...   # 用户证书
+    client-key-data: LS0tLS1CRUdJTiBFQyB     # 用户私钥
+contexts:                       # context 列表（集群:用户 的组合）
+- context:
+    cluster: shield             # 把命令发到这个集群
+    user: coulson               # 用这个凭据认证
+  name: director                # 名为 director 的 context
+current-context: director       # kubectl 默认使用的 context
+</pre>
+</div>
+
+<p>常用的查看与切换命令：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl config current-context
+docker-desktop
+
+$ kubectl config get-contexts
+CURRENT   NAME             CLUSTER          AUTHINFO          NAMESPACE
+*         docker-desktop   docker-desktop   docker-desktop
+          lke349416-ctx    lke349416        lke349416-admin   default
+
+$ kubectl config use-context lke349416-ctx
+Switched to context "lke349416-ctx".
+</pre>
+</div>
+
+<p><code>kubectl config view</code> 可以查看完整配置（敏感数据会被隐藏）。装了 Docker Desktop 的话，也可以点鲸鱼图标 → <em>Kubernetes Context</em> 直接切换。</p>
+
+<h3>把云集群加进 kubeconfig</h3>
+
+<p>从 Akamai 控制台下载集群的 kubeconfig 文件（例如 <code>tkb-kubeconfig.yaml</code>）。分两种情况：</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">还没有 ~/.kube/config</div>
+    <div style="padding:6px 16px 12px">
+      <ol>
+        <li>在家目录创建隐藏文件夹 <code>.kube</code></li>
+        <li>把下载的文件放进去</li>
+        <li>重命名为 <code>config</code>（<strong>不能</strong>带 <code>.yaml</code> 扩展名）</li>
+      </ol>
+    </div>
+  </div>
+  <div class="new">
+    <div class="h">已经有 ~/.kube/config：合并</div>
+    <div class="code" data-lang="bash">
+<pre>
+$ mv ~/.kube/config ~/.kube/config-bkp
+$ export KUBECONFIG=~/.kube/config-bkp:~/.kube/tkb-kubeconfig.yaml
+$ kubectl config view --flatten &gt; ~/.kube/config
+$ export KUBECONFIG=~/.kube/config
+$ kubectl config use-context lke349416-ctx
+</pre>
+    </div>
+  </div>
+</div>
+
+<p>测试一下：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl get nodes
+NAME                            STATUS   ROLES    AGE   VERSION
+lke349416-551020-184a46360000   Ready    &lt;none&gt;   19m   v1.35.1
+lke349416-551020-1c6f99c20000   Ready    &lt;none&gt;   19m   v1.35.1
+lke349416-551020-47ad6c5c0000   Ready    &lt;none&gt;   19m   v1.35.1
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 为什么一个控制平面节点都看不到？</div>
+  <p>
+    三个节点的 ROLES 都是 <code>&lt;none&gt;</code>，说明它们都是工作节点。这是<strong>托管 Kubernetes</strong> 的特点：
+    控制平面由云厂商管理并对你隐藏。如果报错或节点名不是 <code>lke</code> 开头，多半是 kubeconfig 配置有问题，请回头仔细检查。
+  </p>
+</div>
+
+<h2 id="summary">小结</h2>
+<ul>
+  <li>Docker Desktop 一次装好 Docker、kind 多节点集群和 kubectl，适合大部分示例。</li>
+  <li>Gateway API 和存储章节需要云上集群，比如 Akamai LKE；用完要删除。</li>
+  <li>kubectl 把命令转换成 HTTPS REST 请求，发给 kubeconfig 中 <code>current-context</code> 指定的集群，并使用其中的凭据认证。</li>
+  <li>kubeconfig 由 clusters、users、contexts、current-context 四部分组成，context 就是「集群 + 用户」的组合。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>装好 Docker Desktop，创建 3 节点的 kind 集群，运行 <code>kubectl get nodes</code> 看到三个 Ready 节点。</li>
+    <li>运行 <code>kubectl config view</code>，在输出里找到 clusters、users、contexts 三段，说出你当前的 context 由哪个集群和哪个用户组成。</li>
+    <li>运行 <code>kubectl get nodes -v=6</code>，在详细日志里找到 kubectl 真正发出的 HTTP 请求 URL。</li>
+    <li>克隆本书仓库并切到 <code>2026</code> 分支，浏览一下目录结构。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

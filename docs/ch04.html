@@ -1,0 +1,898 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 4 章 · Pod — Kubernetes 入门实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="4">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 4 章</span>
+<h1>Pod</h1>
+<p class="lede">
+  Kubernetes 上的每个应用都运行在 Pod 里：部署应用就是部署 Pod，扩容就是加 Pod，更新就是换上新 Pod。
+  所以这一章会把 Pod 讲得很细——先讲理论，再亲手部署单容器 Pod、init 容器和 sidecar 容器。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>理解 Pod 为什么是一层<strong>抽象</strong>，它给应用增加了哪些能力</li>
+    <li>掌握 Pod 的生命周期、重启策略，以及「Pod 不会被重启，只会被替换」</li>
+    <li>认识 Pod 网络和 CNI 插件</li>
+    <li>分清 <strong>init 容器</strong>和 <strong>sidecar 容器</strong>，并会写它们的 YAML</li>
+    <li>熟练使用 <code>kubectl get / describe / logs / exec / edit</code> 观察 Pod</li>
+    <li>理解资源 <code>requests</code> 和 <code>limits</code></li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="abstraction">Pod 是一层抽象</h2>
+
+<p>
+  Pod 把工作负载的细节抽象掉了：容器、虚拟机、Serverless 函数、Wasm 应用都可以跑在 Pod 里，而 Kubernetes 并不需要知道里面是什么。好处是双向的：
+</p>
+<ul>
+  <li>Kubernetes 只需专注于部署和管理 Pod，不必关心里面装的是什么；</li>
+  <li>不同类型的工作负载可以在同一个集群里并肩运行，共享同一套声明式 API 和 Pod 带来的所有好处。</li>
+</ul>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="四种不同的工作负载都包在 Pod 里运行">
+  <rect class="bx-a" x="20" y="14" width="720" height="40" rx="10"/>
+  <text class="ttl on-a" x="380" y="39" text-anchor="middle">同一个 Kubernetes 集群 · 统一的声明式 API</text>
+
+  <rect class="bx-b" x="20" y="72" width="168" height="160" rx="12"/>
+  <text class="ttl on-b" x="104" y="96" text-anchor="middle">容器</text>
+  <rect class="bx" x="36" y="108" width="136" height="44" rx="8"/><text class="lbl" x="104" y="135" text-anchor="middle">标准 Pod</text>
+  <text class="sm" x="104" y="176" text-anchor="middle">标准控制器</text>
+  <text class="sm" x="104" y="196" text-anchor="middle">标准运行时</text>
+  <text class="sm on-g" x="104" y="218" text-anchor="middle">开箱即用</text>
+
+  <rect class="bx-g" x="204" y="72" width="168" height="160" rx="12"/>
+  <text class="ttl on-g" x="288" y="96" text-anchor="middle">Wasm 应用</text>
+  <rect class="bx" x="220" y="108" width="136" height="44" rx="8"/><text class="lbl" x="288" y="135" text-anchor="middle">标准 Pod</text>
+  <text class="sm" x="288" y="176" text-anchor="middle">标准控制器</text>
+  <text class="sm" x="288" y="196" text-anchor="middle">Wasm 运行时</text>
+  <text class="sm on-g" x="288" y="218" text-anchor="middle">开箱即用</text>
+
+  <rect class="bx-p" x="388" y="72" width="168" height="160" rx="12"/>
+  <text class="ttl on-p" x="472" y="96" text-anchor="middle">Serverless 函数</text>
+  <rect class="bx" x="404" y="108" width="136" height="44" rx="8"/><text class="lbl" x="472" y="135" text-anchor="middle">标准 Pod</text>
+  <text class="sm" x="472" y="176" text-anchor="middle">需要 Knative</text>
+  <text class="sm" x="472" y="196" text-anchor="middle">扩展 API：自定义资源</text>
+  <text class="sm" x="472" y="218" text-anchor="middle">+ 自定义控制器</text>
+
+  <rect class="bx-r" x="572" y="72" width="168" height="160" rx="12"/>
+  <text class="ttl on-r" x="656" y="96" text-anchor="middle">虚拟机</text>
+  <rect class="bx" x="588" y="108" width="136" height="44" rx="8"/><text class="lbl" x="656" y="128" text-anchor="middle">VMI</text><text class="sm" x="656" y="144" text-anchor="middle">（一种改造过的 Pod）</text>
+  <text class="sm" x="656" y="176" text-anchor="middle">需要 KubeVirt</text>
+  <text class="sm" x="656" y="196" text-anchor="middle">扩展 API：自定义资源</text>
+  <text class="sm" x="656" y="218" text-anchor="middle">+ 自定义控制器</text>
+</svg>
+<figcaption>图 4-1　不同的工作负载，都包在 Pod（或类 Pod 对象）里</figcaption>
+</figure>
+
+<h3>Pod 给应用增加了什么</h3>
+
+<div class="cards">
+  <div class="card"><span class="ic">&#129309;</span><h4>资源共享</h4><p>同一 Pod 的容器共享网络、卷、内存等。</p></div>
+  <div class="card"><span class="ic">&#129517;</span><h4>高级调度</h4><p>nodeSelector、亲和性、拓扑分布约束……</p></div>
+  <div class="card"><span class="ic">&#129658;</span><h4>健康探针</h4><p>让 Kubernetes 知道应用是否活着、能否接流量。</p></div>
+  <div class="card"><span class="ic">&#128260;</span><h4>重启策略</h4><p>容器挂了要不要重启。</p></div>
+  <div class="card"><span class="ic">&#128737;</span><h4>安全策略</h4><p>以什么用户运行、有哪些权限。</p></div>
+  <div class="card"><span class="ic">&#128190;</span><h4>卷与终止控制</h4><p>挂载存储；优雅地关闭。</p></div>
+</div>
+
+<p>想看 Pod 支持的全部字段？用 <code>kubectl explain</code>，它是随身携带的 API 文档：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl explain pods --recursive | more     # 超过 1000 行，空格翻页，q 退出
+$ kubectl explain pod.spec.restartPolicy
+KIND:       Pod
+VERSION:    v1
+FIELD:      restartPolicy &lt;string&gt;
+DESCRIPTION:
+    Restart policy for all containers within the pod.
+    One of Always, OnFailure, Never. Default to Always.
+</pre>
+</div>
+
+<h3>共享的执行环境</h3>
+<p>同一个 Pod 里的所有容器共享 Pod 的执行环境。在底层，这对应着几种 Linux 内核命名空间：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="多容器 Pod 共享 IP、卷和多种内核命名空间">
+  <rect class="bx-b" x="20" y="14" width="460" height="262" rx="14"/>
+  <text class="ttl on-b" x="40" y="40">Pod　IP 10.0.10.15</text>
+  <rect class="bx-g" x="44" y="56" width="180" height="76" rx="10"/>
+  <text class="ttl on-g" x="134" y="86" text-anchor="middle">主应用容器</text>
+  <text class="mono sm" x="134" y="110" text-anchor="middle">:8080</text>
+  <rect class="bx-p" x="276" y="56" width="180" height="76" rx="10"/>
+  <text class="ttl on-p" x="366" y="86" text-anchor="middle">sidecar 容器</text>
+  <text class="mono sm" x="366" y="110" text-anchor="middle">:5005</text>
+  <path class="ln-a" d="M226 94 H272" marker-end="url(#ar-a)" marker-start="url(#ar-a)"/>
+  <text class="sm on-a" x="250" y="150" text-anchor="middle">localhost</text>
+
+  <rect class="bx-a" x="44" y="176" width="412" height="44" rx="10"/>
+  <text class="lbl on-a" x="250" y="203" text-anchor="middle">共享卷（volume）</text>
+  <path class="ln" d="M134 134 V174"/><path class="ln" d="M366 134 V174"/>
+  <text class="sm" x="250" y="250" text-anchor="middle">例：sidecar 从 Git 同步静态内容写进卷，主容器读出来当网页提供</text>
+
+  <text class="ttl" x="510" y="40">共享的内核命名空间</text>
+  <rect class="bx" x="510" y="54" width="230" height="36" rx="8"/><text class="mono sm" x="526" y="77">net</text><text class="sm" x="580" y="77">网络栈（同一个 IP）</text>
+  <rect class="bx" x="510" y="96" width="230" height="36" rx="8"/><text class="mono sm" x="526" y="119">mnt</text><text class="sm" x="580" y="119">文件系统与卷</text>
+  <rect class="bx" x="510" y="138" width="230" height="36" rx="8"/><text class="mono sm" x="526" y="161">ipc</text><text class="sm" x="580" y="161">共享内存</text>
+  <rect class="bx" x="510" y="180" width="230" height="36" rx="8"/><text class="mono sm" x="526" y="203">pid</text><text class="sm" x="580" y="203">进程树</text>
+  <rect class="bx" x="510" y="222" width="230" height="36" rx="8"/><text class="mono sm" x="526" y="245">uts</text><text class="sm" x="580" y="245">主机名（= Pod 名）</text>
+</svg>
+<figcaption>图 4-2　Pod 是容器们共用的「小房子」</figcaption>
+</figure>
+
+<h2 id="scheduling">Pod 与调度</h2>
+
+<p>
+  同一个 Pod 的所有容器一定会被调度到<strong>同一个节点</strong>。但请记住：只有当容器<strong>需要共享资源</strong>（内存、卷、网络）时才放进同一个 Pod。
+  如果你只是希望两个工作负载落在同一个节点上，应该把它们放在<strong>不同的 Pod</strong> 里，再用下面的手段控制调度：
+</p>
+
+<div class="tw">
+<table>
+  <tr><th>手段</th><th>作用</th><th>一句话理解</th></tr>
+  <tr><td><code>nodeSelector</code></td><td>给出一组标签，只调度到拥有<strong>全部</strong>这些标签的节点</td><td>最简单的「指定节点」</td></tr>
+  <tr><td>亲和性 / 反亲和性</td><td>更强大的 nodeSelector：可以靠近或远离某些节点或 Pod，支持硬规则和软规则</td><td>吸引 / 排斥</td></tr>
+  <tr><td>拓扑分布约束</td><td>按可用区等「拓扑域」把 Pod 分散开，用于高可用、就近访问等</td><td>别把鸡蛋放一个篮子</td></tr>
+  <tr><td>资源 requests / limits</td><td>告诉调度器 Pod 需要多少 CPU 和内存</td><td><strong>每个 Pod 都应该设置</strong></td></tr>
+</table>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="亲和性与反亲和性的硬规则和软规则">
+  <rect class="bx" x="140" y="14" width="300" height="34" rx="8"/>
+  <text class="ttl" x="290" y="37" text-anchor="middle">亲和性（affinity）= 吸引</text>
+  <rect class="bx" x="450" y="14" width="290" height="34" rx="8"/>
+  <text class="ttl" x="595" y="37" text-anchor="middle">反亲和性（anti-affinity）= 排斥</text>
+
+  <rect class="bx-r" x="20" y="58" width="110" height="64" rx="8"/>
+  <text class="ttl on-r" x="75" y="86" text-anchor="middle">硬规则</text>
+  <text class="sm" x="75" y="106" text-anchor="middle">必须遵守</text>
+  <rect class="bx-r" x="140" y="58" width="300" height="64" rx="8"/>
+  <text class="sm" x="156" y="84">只调度到有 project=tkb 标签的节点</text>
+  <text class="sm" x="156" y="104">找不到？那就不调度（Pending）</text>
+  <rect class="bx-r" x="450" y="58" width="290" height="64" rx="8"/>
+  <text class="sm" x="466" y="84">只调度到没有该标签的节点</text>
+  <text class="sm" x="466" y="104">找不到？同样不调度</text>
+
+  <rect class="bx-g" x="20" y="132" width="110" height="64" rx="8"/>
+  <text class="ttl on-g" x="75" y="160" text-anchor="middle">软规则</text>
+  <text class="sm" x="75" y="180" text-anchor="middle">尽力而为</text>
+  <rect class="bx-g" x="140" y="132" width="300" height="64" rx="8"/>
+  <text class="sm" x="156" y="158">优先找有 project=tkb 标签的节点</text>
+  <text class="sm" x="156" y="178">找不到就随便找个能跑的</text>
+  <rect class="bx-g" x="450" y="132" width="290" height="64" rx="8"/>
+  <text class="sm" x="466" y="158">优先避开有该标签的节点</text>
+  <text class="sm" x="466" y="178">实在避不开也能接受</text>
+</svg>
+<figcaption>图 4-3　规则既可以针对节点的标签，也可以针对其他 Pod 的标签</figcaption>
+</figure>
+
+<h2 id="deploying">部署一个 Pod 的完整过程</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="部署 Pod 的九个步骤">
+  <rect class="bx" x="20" y="20" width="160" height="52" rx="10"/>
+  <text class="lbl" x="100" y="42" text-anchor="middle">① 在 YAML 里定义 Pod</text>
+  <text class="sm" x="100" y="60" text-anchor="middle">pod.yml</text>
+  <rect class="bx-b" x="210" y="20" width="160" height="52" rx="10"/>
+  <text class="lbl on-b" x="290" y="42" text-anchor="middle">② 提交给 API 服务器</text>
+  <text class="sm" x="290" y="60" text-anchor="middle">kubectl apply</text>
+  <rect class="bx-p" x="400" y="20" width="160" height="52" rx="10"/>
+  <text class="lbl on-p" x="480" y="42" text-anchor="middle">③ 认证 + 授权</text>
+  <text class="sm" x="480" y="60" text-anchor="middle">你是谁、能不能做</text>
+  <rect class="bx-p" x="590" y="20" width="150" height="52" rx="10"/>
+  <text class="lbl on-p" x="665" y="42" text-anchor="middle">④ 校验 Pod spec</text>
+  <text class="sm" x="665" y="60" text-anchor="middle">字段是否合法</text>
+
+  <rect class="bx-a" x="590" y="104" width="150" height="62" rx="10"/>
+  <text class="lbl on-a" x="665" y="126" text-anchor="middle">⑤ 调度器过滤节点</text>
+  <text class="sm" x="665" y="144" text-anchor="middle">选择器、亲和性、</text>
+  <text class="sm" x="665" y="158" text-anchor="middle">资源……</text>
+  <rect class="bx-a" x="400" y="104" width="160" height="62" rx="10"/>
+  <text class="lbl on-a" x="480" y="130" text-anchor="middle">⑥ 分配给健康节点</text>
+  <text class="sm" x="480" y="150" text-anchor="middle">找不到 → Pending</text>
+  <rect class="bx-g" x="210" y="104" width="160" height="62" rx="10"/>
+  <text class="lbl on-g" x="290" y="130" text-anchor="middle">⑦ kubelet 发现任务</text>
+  <text class="sm" x="290" y="150" text-anchor="middle">它一直在 watch API</text>
+  <rect class="bx-g" x="20" y="104" width="160" height="62" rx="10"/>
+  <text class="lbl on-g" x="100" y="130" text-anchor="middle">⑧ 下载 spec</text>
+  <text class="sm" x="100" y="150" text-anchor="middle">让运行时启动容器</text>
+
+  <rect class="bx-g" x="20" y="190" width="350" height="44" rx="10"/>
+  <text class="lbl on-g" x="195" y="217" text-anchor="middle">⑨ kubelet 持续监控 Pod，并把状态变化报告给 API 服务器</text>
+  <text class="sm" x="560" y="210" text-anchor="middle">部署 Pod 是原子操作：</text>
+  <text class="sm" x="560" y="228" text-anchor="middle">全部容器就绪后才开始接收请求</text>
+
+  <path class="ln" d="M182 46 H206" marker-end="url(#ar)"/>
+  <path class="ln" d="M372 46 H396" marker-end="url(#ar)"/>
+  <path class="ln" d="M562 46 H586" marker-end="url(#ar)"/>
+  <path class="ln" d="M665 74 V100" marker-end="url(#ar)"/>
+  <path class="ln" d="M588 135 H564" marker-end="url(#ar)"/>
+  <path class="ln" d="M398 135 H374" marker-end="url(#ar)"/>
+  <path class="ln" d="M208 135 H184" marker-end="url(#ar)"/>
+  <path class="ln" d="M100 168 V186" marker-end="url(#ar)"/>
+</svg>
+<figcaption>图 4-4　从 YAML 到运行中的 Pod</figcaption>
+</figure>
+
+<h2 id="lifecycle">Pod 的生命周期</h2>
+
+<p>Pod 被设计成<strong>会死的（mortal）</strong>和<strong>不可变的（immutable）</strong>：</p>
+<ul>
+  <li><strong>会死</strong>：失败或被删除的 Pod 不能被「重启」。控制器会用新 Pod 替换它，但这和修好原来那个不是一回事。</li>
+  <li><strong>不可变</strong>：部署后就不能修改。要改就新建一个、删掉旧的。需要保存数据？挂一个<strong>卷</strong>，把数据写进卷里，Pod 没了数据还在。</li>
+</ul>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="Pod 的生命周期阶段">
+  <rect class="bx" x="20" y="70" width="110" height="50" rx="10"/>
+  <text class="lbl" x="75" y="100" text-anchor="middle">提交 YAML</text>
+  <rect class="bx-a" x="170" y="70" width="140" height="50" rx="10"/>
+  <text class="ttl on-a" x="240" y="92" text-anchor="middle">Pending</text>
+  <text class="sm" x="240" y="110" text-anchor="middle">等待调度、拉镜像</text>
+  <rect class="bx-b" x="350" y="70" width="140" height="50" rx="10"/>
+  <text class="ttl on-b" x="420" y="92" text-anchor="middle">Running</text>
+  <text class="sm" x="420" y="110" text-anchor="middle">全部容器已运行</text>
+  <rect class="bx-g" x="540" y="20" width="200" height="56" rx="10"/>
+  <text class="ttl on-g" x="640" y="44" text-anchor="middle">Succeeded</text>
+  <text class="sm" x="640" y="64" text-anchor="middle">短任务：容器都正常结束</text>
+  <rect class="bx-r" x="540" y="116" width="200" height="56" rx="10"/>
+  <text class="ttl on-r" x="640" y="140" text-anchor="middle">Failed</text>
+  <text class="sm" x="640" y="160" text-anchor="middle">有容器以错误退出</text>
+  <path class="ln" d="M132 95 H166" marker-end="url(#ar)"/>
+  <path class="ln" d="M312 95 H346" marker-end="url(#ar)"/>
+  <path class="ln-g" d="M492 88 L536 52" marker-end="url(#ar-g)"/>
+  <path class="ln-r" d="M492 102 L536 140" marker-end="url(#ar-r)"/>
+  <text class="sm" x="420" y="150" text-anchor="middle">Web 服务器这类长期任务</text>
+  <text class="sm" x="420" y="168" text-anchor="middle">会一直停留在 Running</text>
+</svg>
+<figcaption>图 4-5　Pod 的典型生命周期</figcaption>
+</figure>
+
+<div class="box deep">
+  <div class="t">&#128302; 题外话：虚拟机恰恰相反</div>
+  <p>
+    虚拟机被设计成<strong>可变且长生不死</strong>的：可以重启、改配置、甚至热迁移。这和 Pod 的设计目标完全相反，
+    所以 KubeVirt 要把 VM 包在一种改造过的 Pod（VMI）里，并用自定义控制器管理它。
+  </p>
+</div>
+
+<h3>重启策略：重启的是容器，不是 Pod</h3>
+
+<p>
+  节点故障、节点维护驱逐、扩缩容、更新、回滚……这些情况下 Pod 都会被<strong>删掉并替换成新 Pod</strong>：同样的 spec，但新的 UID、新的 IP、没有任何旧状态。
+  <strong>Kubernetes 不会重启 Pod，但可以在同一节点上重启容器</strong>。这由本地 kubelet 执行，取决于 Pod 的 <code>spec.restartPolicy</code>：
+</p>
+
+<div class="tw">
+<table>
+  <tr><th>策略</th><th>含义</th><th>适合</th></tr>
+  <tr><td><code>Always</code>（默认）</td><td>容器退出就重启</td><td>长期运行：Web 服务器、数据库、消息队列</td></tr>
+  <tr><td><code>OnFailure</code></td><td>只在以错误码退出时重启</td><td>批处理任务：跑完就好，失败再来</td></tr>
+  <tr><td><code>Never</code></td><td>从不重启</td><td>失败了也无所谓的一次性任务</td></tr>
+</table>
+</div>
+<p>这个策略作用于 Pod 里的所有容器（init 容器除外）。</p>
+
+<h3>静态 Pod vs 控制器管理的 Pod</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="静态 Pod 与控制器管理的 Pod 的对比">
+  <rect class="bx-r" x="20" y="14" width="350" height="200" rx="12"/>
+  <text class="ttl on-r" x="195" y="38" text-anchor="middle">直接用 Pod 清单部署（少见）</text>
+  <rect class="bx" x="40" y="54" width="150" height="90" rx="10"/>
+  <text class="lbl" x="115" y="76" text-anchor="middle">节点 A</text>
+  <rect class="bx-b" x="56" y="86" width="118" height="44" rx="8"/>
+  <text class="sm" x="115" y="104" text-anchor="middle">Pod</text>
+  <text class="sm" x="115" y="120" text-anchor="middle">只有 kubelet 看管</text>
+  <text class="sm" x="210" y="80">✗ 不能自愈</text>
+  <text class="sm" x="210" y="100">✗ 不能扩缩</text>
+  <text class="sm" x="210" y="120">✗ 不能滚动更新</text>
+  <text class="sm on-r" x="195" y="174" text-anchor="middle">节点一挂，kubelet 跟着挂，</text>
+  <text class="sm on-r" x="195" y="194" text-anchor="middle">没人能把 Pod 挪到别处</text>
+
+  <rect class="bx-g" x="390" y="14" width="350" height="200" rx="12"/>
+  <text class="ttl on-g" x="565" y="38" text-anchor="middle">通过控制器部署（常见）</text>
+  <rect class="bx-a" x="480" y="50" width="170" height="36" rx="8"/>
+  <text class="lbl on-a" x="565" y="73" text-anchor="middle">控制器（高可用）</text>
+  <rect class="bx" x="410" y="110" width="140" height="56" rx="8" stroke-dasharray="5 4"/>
+  <text class="sm" x="480" y="134" text-anchor="middle">节点 A ✗ 故障</text>
+  <text class="sm on-r" x="480" y="154" text-anchor="middle">Pod 丢失</text>
+  <rect class="bx" x="580" y="110" width="140" height="56" rx="8"/>
+  <text class="sm" x="650" y="134" text-anchor="middle">节点 B</text>
+  <text class="sm on-g" x="650" y="154" text-anchor="middle">新 Pod ✓</text>
+  <path class="ln-g" d="M600 88 L640 106" marker-end="url(#ar-g)"/>
+  <text class="sm" x="565" y="194" text-anchor="middle">自愈、扩缩、滚动更新、版本回滚</text>
+</svg>
+<figcaption>图 4-6　几乎总是通过 Deployment 等控制器来部署 Pod（第 6 章）</figcaption>
+</figure>
+
+<h2 id="network">Pod 网络</h2>
+
+<p>
+  每个集群都运行着一个 <strong>Pod 网络</strong>，所有 Pod 自动接入。它通常是一个横跨所有节点的扁平二层<em>覆盖网络（overlay）</em>，
+  让<strong>每个 Pod 都能直接和任何其他 Pod 通信</strong>，即使对方在另一个节点上。
+  Pod 网络由第三方插件通过 <strong>CNI（Container Network Interface）</strong>实现，在建集群时选定。撰写本书时最流行的是 <strong>Cilium</strong>。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="Pod 网络横跨三个节点">
+  <rect class="bx" x="20" y="14" width="220" height="90" rx="10"/>
+  <text class="lbl" x="36" y="34">节点 1</text>
+  <rect class="bx-b" x="40" y="46" width="80" height="44" rx="8"/><text class="sm" x="80" y="73" text-anchor="middle">Pod</text>
+  <rect class="bx-b" x="140" y="46" width="80" height="44" rx="8"/><text class="sm" x="180" y="73" text-anchor="middle">Pod</text>
+  <rect class="bx" x="270" y="14" width="220" height="90" rx="10"/>
+  <text class="lbl" x="286" y="34">节点 2</text>
+  <rect class="bx-b" x="340" y="46" width="80" height="44" rx="8"/><text class="sm" x="380" y="73" text-anchor="middle">Pod</text>
+  <rect class="bx" x="520" y="14" width="220" height="90" rx="10"/>
+  <text class="lbl" x="536" y="34">节点 3</text>
+  <rect class="bx-b" x="540" y="46" width="80" height="44" rx="8"/><text class="sm" x="580" y="73" text-anchor="middle">Pod</text>
+  <rect class="bx-b" x="640" y="46" width="80" height="44" rx="8"/><text class="sm" x="680" y="73" text-anchor="middle">Pod</text>
+
+  <rect class="bx-a" x="20" y="132" width="720" height="40" rx="10"/>
+  <text class="ttl on-a" x="380" y="157" text-anchor="middle">Pod 网络（CNI 插件，如 Cilium）—— 所有 Pod 互通</text>
+  <path class="ln-a" d="M80 92 V130"/><path class="ln-a" d="M180 92 V130"/><path class="ln-a" d="M380 92 V130"/>
+  <path class="ln-a" d="M580 92 V130"/><path class="ln-a" d="M680 92 V130"/>
+
+  <rect class="bx-d" x="20" y="192" width="720" height="34" rx="8"/>
+  <text class="lbl" x="380" y="214" text-anchor="middle">节点自己接的是外部网络（数据中心 / 云 VPC），而不是 Pod 网络</text>
+</svg>
+<figcaption>图 4-7　Pod 网络让跨节点的 Pod 像在同一个局域网里</figcaption>
+</figure>
+
+<div class="box warn">
+  <div class="t">&#9888; 默认网络往往是「全开」的</div>
+  <p>新建的集群通常有一个几乎没有安全限制的 Pod 网络，这让 Kubernetes 好上手。但在生产环境，你应该用 <strong>NetworkPolicy（网络策略）</strong>等手段把它管起来。</p>
+</div>
+
+<h2 id="multi">多容器 Pod：init 与 sidecar</h2>
+
+<p>
+  按微服务设计原则，每个容器应只有<strong>一个明确的职责</strong>（单一职责原则 / 关注点分离）。
+  例如「从仓库同步内容并以网页提供」有两个职责：同步、提供。大多数时候应用容器各自放在自己的 Pod 里、通过 Pod 网络通信；
+  但像这个例子，把两个容器放进同一个 Pod、通过共享卷交换数据，会更合适。Kubernetes 为多容器 Pod 提供两种主要模式：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 270" role="img" aria-label="init 容器与 sidecar 容器的时间线对比">
+  <text class="ttl" x="20" y="24">init 容器：先跑完，主容器才启动（只跑一次）</text>
+  <path class="ln" d="M120 100 H740" marker-end="url(#ar)"/>
+  <text class="sm" x="730" y="118" text-anchor="end">时间 →</text>
+  <rect class="bx-p" x="120" y="40" width="130" height="28" rx="6"/>
+  <text class="sm on-p" x="185" y="59" text-anchor="middle">init 容器 1</text>
+  <rect class="bx-p" x="254" y="40" width="110" height="28" rx="6"/>
+  <text class="sm on-p" x="309" y="59" text-anchor="middle">init 容器 2</text>
+  <rect class="bx-g" x="368" y="72" width="360" height="24" rx="6"/>
+  <text class="sm on-g" x="548" y="89" text-anchor="middle">主应用容器</text>
+  <text class="lbl" x="20" y="60">按顺序执行</text>
+  <text class="lbl" x="20" y="89">之后才启动</text>
+
+  <text class="ttl" x="20" y="158">sidecar 容器：先启动，陪跑全程，最后退出（v1.33 起 GA）</text>
+  <path class="ln" d="M120 244 H740" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="120" y="176" width="610" height="28" rx="6"/>
+  <text class="sm on-a" x="425" y="195" text-anchor="middle">sidecar（initContainers 里 + restartPolicy: Always）</text>
+  <rect class="bx-g" x="180" y="210" width="500" height="28" rx="6"/>
+  <text class="sm on-g" x="430" y="229" text-anchor="middle">主应用容器</text>
+  <text class="lbl" x="20" y="195">先启动</text>
+  <text class="lbl" x="20" y="229">后启动、先退出</text>
+</svg>
+<figcaption>图 4-8　init 容器做「准备工作」，sidecar 容器做「陪跑服务」</figcaption>
+</figure>
+
+<h3>init 容器</h3>
+<p>
+  init 容器定义在 <code>spec.initContainers</code> 下。Kubernetes 保证它们<strong>在主容器之前启动并完成</strong>，而且<strong>只运行一次</strong>。典型用途：
+</p>
+<ul>
+  <li>等某个远程 API 就绪后再启动主应用——把「轮询检查」的逻辑从主应用里拿出去；</li>
+  <li>启动前一次性克隆远程仓库——服务器地址、证书、认证、校验这些复杂逻辑都不用塞进主应用。</li>
+</ul>
+<p>
+  可以有多个 init 容器，按清单中的顺序依次运行，全部成功后才启动主容器。init 容器失败会被重试；但如果 Pod 的 <code>restartPolicy</code> 是 <code>Never</code>，整个 Pod 就失败。
+  init 容器的局限是：它只能在主容器<strong>之前</strong>跑。需要和主容器<strong>同时</strong>运行的辅助功能，就要用 sidecar。
+</p>
+
+<h3>sidecar 容器</h3>
+<p>
+  sidecar 的职责是<strong>在不修改应用容器的前提下给它增加功能</strong>：采集日志、同步远程内容、代理连接、处理数据、加密流量（服务网格）……
+  老版本 Kubernetes 没有 sidecar 概念，只能用普通容器模拟，无法保证启动和退出顺序。从 <strong>v1.33</strong> 起 sidecar 是稳定特性，写法是：
+  <strong>放在 <code>spec.initContainers</code> 下，并给这个容器设置 <code>restartPolicy: Always</code></strong>。这样 Kubernetes 保证它：
+</p>
+<ol>
+  <li>在主应用容器<strong>之前</strong>启动</li>
+  <li>与主应用容器<strong>一起</strong>持续运行</li>
+  <li>在主应用容器<strong>之后</strong>终止</li>
+</ol>
+
+<h2 id="manifest">动手：第一个 Pod 清单</h2>
+
+<p>以下命令都在仓库的 <code>pods</code> 目录下执行。先看 <code>pod.yml</code>：</p>
+
+<div class="code" data-lang="yaml" data-file="pods/pod.yml">
+<pre>
+apiVersion: v1
+kind: Pod
+metadata:
+  name: hello-pod
+  labels:
+    zone: prod
+    version: v1
+spec:
+  containers:
+  - name: hello-ctr
+    image: nigelpoulton/k8sbook:1.0
+    ports:
+    - containerPort: 8080
+    resources:
+      limits:
+        memory: 256Mi
+        cpu: "0.5"
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="Kubernetes 清单的四个顶层字段">
+  <rect class="bx-b" x="20" y="20" width="170" height="150" rx="12"/>
+  <text class="ttl on-b" x="105" y="46" text-anchor="middle">kind</text>
+  <text class="sm" x="105" y="76" text-anchor="middle">要创建什么类型的对象</text>
+  <text class="mono sm" x="105" y="104" text-anchor="middle">Pod / Deployment</text>
+  <text class="mono sm" x="105" y="122" text-anchor="middle">Service …</text>
+
+  <rect class="bx-p" x="205" y="20" width="170" height="150" rx="12"/>
+  <text class="ttl on-p" x="290" y="46" text-anchor="middle">apiVersion</text>
+  <text class="sm" x="290" y="76" text-anchor="middle">用哪个版本的 API</text>
+  <text class="sm" x="290" y="94" text-anchor="middle">模式（schema）来创建</text>
+  <text class="mono sm" x="290" y="122" text-anchor="middle">v1 / apps/v1</text>
+
+  <rect class="bx-g" x="390" y="20" width="170" height="150" rx="12"/>
+  <text class="ttl on-g" x="475" y="46" text-anchor="middle">metadata</text>
+  <text class="sm" x="475" y="76" text-anchor="middle">名字、标签、注解、</text>
+  <text class="sm" x="475" y="94" text-anchor="middle">所在命名空间</text>
+  <text class="mono sm" x="475" y="122" text-anchor="middle">name: hello-pod</text>
+
+  <rect class="bx-a" x="575" y="20" width="165" height="150" rx="12"/>
+  <text class="ttl on-a" x="657" y="46" text-anchor="middle">spec</text>
+  <text class="sm" x="657" y="76" text-anchor="middle">真正的「期望状态」：</text>
+  <text class="sm" x="657" y="94" text-anchor="middle">容器、镜像、端口、</text>
+  <text class="sm" x="657" y="112" text-anchor="middle">资源……</text>
+  <text class="sm" x="657" y="140" text-anchor="middle">大部分内容都在这里</text>
+  <text class="sm" x="380" y="194" text-anchor="middle">几乎所有 Kubernetes 对象的 YAML 都有这四个顶层字段</text>
+</svg>
+<figcaption>图 4-9　读懂任意清单的第一步：认出这四块</figcaption>
+</figure>
+
+<p>
+  这个 Pod 叫 <code>hello-pod</code>，带有两个标签（以后用来和 Service 连接）。它只有一个容器 <code>hello-ctr</code>，
+  使用 <code>nigelpoulton/k8sbook:1.0</code> 镜像，监听 8080 端口，最多使用 256Mi 内存和半个 CPU。
+</p>
+
+<div class="box tip">
+  <div class="t">&#128161; 清单即文档：Empathy as Code</div>
+  <p>
+    YAML 文件是绝佳的文档：新同事读它们就能快速了解应用的基本功能和需求；运维团队能从中看到端口、CPU、内存等要求；
+    放进 Git 还能做版本管理和 diff。Nirmal Mehta 在 2017 年 DockerCon 上把这称为<strong>「代码化的同理心」</strong>。
+  </p>
+</div>
+
+<h3>部署并观察</h3>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f pod.yml
+pod/hello-pod created
+
+$ kubectl get pods
+NAME        READY   STATUS              RESTARTS   AGE
+hello-pod   0/1     ContainerCreating   0          7s
+</pre>
+</div>
+
+<p>
+  输出说 created，但它可能还在拉镜像。等 <code>READY</code> 变成 <code>1/1</code>、<code>STATUS</code> 变成 <code>Running</code>，Pod 就在一个健康节点上跑起来了，并受该节点 kubelet 的监控。
+  Kubernetes 默认从 <strong>Docker Hub</strong> 拉镜像；要用别的镜像仓库，在镜像名前加上仓库地址即可。
+</p>
+
+<h2 id="introspect">观察 Pod 的五件利器</h2>
+
+<h3>kubectl get</h3>
+<p><code>-o wide</code> 多显示几列（IP、节点）；<code>-o yaml</code> 显示 Kubernetes 知道的关于这个对象的<strong>一切</strong>：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl get pods hello-pod -o yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: hello-pod
+  namespace: default
+spec:                        # ← 期望状态
+  containers:
+  - image: nigelpoulton/k8sbook:1.0
+    imagePullPolicy: IfNotPresent
+    name: hello-ctr
+status:                      # ← 观测状态
+  conditions:
+  - lastTransitionTime: "2026-02-18T10:06:02Z"
+    status: "True"
+    type: Initialized
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 输出为什么比我写的 17 行 YAML 多那么多？</div>
+  <p>两个来源：① 你没写的字段都被填上了<strong>默认值</strong>；② <code>status</code> 段是 Pod 的<strong>当前状态</strong>，本来就不在你的文件里。
+  <code>spec</code> 对 <code>status</code>，正是第 2 章「期望状态 vs 观测状态」的具体体现。</p>
+</div>
+
+<h3>kubectl describe</h3>
+<p>格式友好的概览，最有用的是底部的 <strong>Events（事件）</strong>，排错时首先看这里：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl describe pod hello-pod
+Name:         hello-pod
+Namespace:    default
+Labels:       version=v1
+              zone=prod
+Status:       Running
+IP:           10.1.0.103
+...
+Events:
+  Type    Reason     Age    Message
+  ----    ------     ----   -------
+  Normal  Scheduled  5m30s  Successfully assigned ...
+  Normal  Pulling    5m30s  Pulling image "nigelpoulton/k8sbook:1.0"
+  Normal  Pulled     5m8s   Successfully pulled image ...
+  Normal  Created    5m8s   Created container hello-ctr
+  Normal  Started    5m8s   Started container hello-ctr
+</pre>
+</div>
+
+<h3>kubectl logs</h3>
+<p>
+  <code>kubectl logs &lt;pod&gt;</code> 获取容器日志。对多容器 Pod，默认取<strong>第一个</strong>容器的日志，
+  要看别的容器就加 <code>--container</code>：
+</p>
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl logs logtest --container syncer
+</pre>
+</div>
+
+<h3>kubectl exec</h3>
+<p>在运行中的容器里执行命令，有两种用法：</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">远程执行一条命令</div>
+    <div class="code" data-lang="bash">
+<pre>
+$ kubectl exec hello-pod -- ps
+PID   USER     TIME  COMMAND
+    1 root      0:00 node ./app.js
+   18 root      0:00 ps
+</pre>
+    </div>
+  </div>
+  <div class="new">
+    <div class="h">交互式会话（-it），像 SSH 登录</div>
+    <div class="code" data-lang="bash">
+<pre>
+$ kubectl exec -it hello-pod -- sh
+/src # apk add curl
+/src # curl localhost:8080
+&lt;html&gt;&lt;head&gt;&lt;title&gt;K8s rocks!&lt;/title&gt;...
+/src # env | grep HOSTNAME
+HOSTNAME=hello-pod
+/src # exit
+</pre>
+    </div>
+  </div>
+</div>
+
+<p>
+  格式是 <code>kubectl exec &lt;pod&gt; -- &lt;命令&gt;</code>，只能执行容器里装了的命令（所以一开始 <code>curl</code> 会报 <em>executable file not found</em>）。
+  <code>-it</code> 把你终端的标准输入输出接到容器上。
+</p>
+
+<div class="box warn">
+  <div class="t">&#9888; 在线改 Pod 是反模式</div>
+  <p>在运行的容器里装软件只是为了演示。真实环境中 Pod 应该是不可变的，要改就改镜像或 YAML，然后换新 Pod。</p>
+</div>
+
+<h3>Pod 的主机名</h3>
+<p>
+  Pod 的 <code>metadata.name</code> 会成为 Pod 内<strong>每个容器</strong>的主机名（上面 <code>HOSTNAME=hello-pod</code> 就是证明）。
+  所以 Pod 名应该是合法的 DNS 名：只用 a-z、0-9、连字符和点。
+</p>
+
+<h3>kubectl edit：验证不可变性</h3>
+<p>
+  不可变性分两层：<strong>对象不可变</strong>（Pod 本身，Kubernetes 会阻止修改）和<strong>应用不可变</strong>（容器内部，Kubernetes 管不了，要靠你保证容器无状态）。试试：
+</p>
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl edit pod hello-pod
+</pre>
+</div>
+<p>
+  它会用默认编辑器（Mac/Linux 通常是 vi，Windows 是记事本）打开 Pod 的实时配置。试着改容器名、端口或资源值，保存退出，
+  你会收到 <em>forbidden</em> 的提示——这些字段不可变。（卡在 vi 里出不来？输入 <code>:q!</code> 回车。）
+</p>
+
+<h2 id="resources">资源 requests 与 limits</h2>
+
+<div class="code" data-lang="yaml">
+<pre>
+resources:
+  requests:        # 最小值：调度时使用
+    cpu: 0.5
+    memory: 256Mi
+  limits:          # 最大值：kubelet 让运行时强制封顶
+    cpu: 1.0
+    memory: 512Mi
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="requests 与 limits 的含义">
+  <text class="ttl" x="20" y="24">一个容器的内存使用范围</text>
+  <rect class="bx" x="20" y="44" width="720" height="44" rx="8"/>
+  <rect class="bx-g" x="20" y="44" width="240" height="44" rx="8"/>
+  <text class="lbl on-g" x="140" y="71" text-anchor="middle">0 – 256Mi：保证有</text>
+  <rect class="bx-a" x="260" y="44" width="240" height="44" rx="0"/>
+  <text class="lbl on-a" x="380" y="71" text-anchor="middle">256Mi – 512Mi：节点有富余就能用</text>
+  <rect class="bx-r" x="500" y="44" width="240" height="44" rx="8"/>
+  <text class="lbl on-r" x="620" y="71" text-anchor="middle">超过 512Mi：不允许</text>
+
+  <path class="ln-g" d="M260 96 V120"/>
+  <text class="ttl on-g" x="260" y="138" text-anchor="middle">requests</text>
+  <text class="sm" x="260" y="158" text-anchor="middle">调度器据此挑节点；kubelet 预留出来</text>
+  <path class="ln-r" d="M500 96 V120"/>
+  <text class="ttl on-r" x="500" y="138" text-anchor="middle">limits</text>
+  <text class="sm" x="500" y="158" text-anchor="middle">运行时据此设上限</text>
+  <text class="sm" x="380" y="190" text-anchor="middle">只写了 limits 没写 requests？Kubernetes 会自动让 requests = limits</text>
+</svg>
+<figcaption>图 4-10　requests 是「下限保证」，limits 是「上限封顶」</figcaption>
+</figure>
+
+<ul>
+  <li>调度器读取 <strong>requests</strong>，把 Pod 分配到资源足够的节点；找不到就 Pending，集群自动扩缩器（Cluster Autoscaler）会尝试加节点。</li>
+  <li>kubelet 预留 requests 的资源，并让运行时按 <strong>limits</strong> 设置上限。</li>
+  <li>多容器 Pod：调度器把所有容器的 requests <strong>加起来</strong>找节点。</li>
+</ul>
+
+<h2 id="init-demo">动手：init 容器</h2>
+
+<div class="code" data-lang="yaml" data-file="pods/initpod.yml">
+<pre>
+apiVersion: v1
+kind: Pod
+metadata:
+  name: initpod
+  labels:
+    app: initializer
+spec:
+  initContainers:               # ← init 容器
+  - name: init-ctr
+    image: busybox:1.28.4
+    command: ['sh', '-c', 'until nslookup k8sbook; do echo waiting for k8sbook service; sleep 1; done; echo Service found!']
+  containers:                   # ← 主应用容器
+    - name: web-ctr
+      image: nigelpoulton/web-app:1.0
+      ports:
+        - containerPort: 8080
+</pre>
+</div>
+
+<p>init 容器不停地查一个叫 <code>k8sbook</code> 的 Service，找到才退出。部署并观察：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f initpod.yml
+pod/initpod created
+
+$ kubectl get pods --watch
+NAME      READY   STATUS     RESTARTS   AGE
+initpod   0/1     Init:0/1   0          23s
+</pre>
+</div>
+
+<p><code>Init:0/1</code> 表示 init 容器还在跑，主容器没启动，<code>kubectl describe</code> 会显示整个 Pod 是 <code>Pending</code>。现在创建它要找的 Service：</p>
+
+<div class="code" data-lang="yaml" data-file="pods/initsvc.yml">
+<pre>
+apiVersion: v1
+kind: Service
+metadata:
+  name: k8sbook
+spec:
+  selector:
+    app: initializer
+  ports:
+    - port: 80
+      targetPort: 8080
+  type: ClusterIP
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f initsvc.yml
+service/k8sbook created
+
+$ kubectl get pods --watch
+NAME      READY   STATUS            RESTARTS   AGE
+initpod   0/1     Init:0/1          0          47s
+initpod   0/1     PodInitializing   0          2m23s
+initpod   1/1     Running           0          2m48s
+</pre>
+</div>
+
+<p>init 容器看到 Service 后成功退出（exit code 0，状态 terminated），主容器随即启动。</p>
+
+<h2 id="sidecar-demo">动手：sidecar 容器</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="git-sync sidecar 把 GitHub 内容同步到共享卷，由 nginx 提供">
+  <rect class="bx" x="20" y="80" width="130" height="60" rx="10"/>
+  <text class="ttl" x="85" y="106" text-anchor="middle">GitHub 仓库</text>
+  <text class="sm" x="85" y="126" text-anchor="middle">你 fork 的 ps-sidecar</text>
+
+  <rect class="bx-b" x="190" y="14" width="400" height="200" rx="14"/>
+  <text class="ttl on-b" x="206" y="38">Pod：git-sync</text>
+  <rect class="bx-a" x="210" y="54" width="160" height="60" rx="10"/>
+  <text class="ttl on-a" x="290" y="78" text-anchor="middle">ctr-sync</text>
+  <text class="sm" x="290" y="98" text-anchor="middle">sidecar：持续同步</text>
+  <rect class="bx-g" x="410" y="54" width="160" height="60" rx="10"/>
+  <text class="ttl on-g" x="490" y="78" text-anchor="middle">ctr-web</text>
+  <text class="sm" x="490" y="98" text-anchor="middle">nginx：提供网页</text>
+  <rect class="bx-p" x="210" y="144" width="360" height="50" rx="10"/>
+  <text class="ttl on-p" x="390" y="166" text-anchor="middle">卷 html（emptyDir）</text>
+  <text class="sm" x="390" y="184" text-anchor="middle">sidecar 写 /tmp/git，nginx 读 /usr/share/nginx/</text>
+  <path class="ln-a" d="M290 116 V140" marker-end="url(#ar-a)"/>
+  <path class="ln-g" d="M490 140 V118" marker-end="url(#ar-g)"/>
+
+  <path class="ln" d="M152 110 C175 110 180 84 206 84" marker-end="url(#ar)"/>
+
+  <rect class="bx" x="630" y="54" width="110" height="60" rx="10"/>
+  <text class="ttl" x="685" y="80" text-anchor="middle">浏览器</text>
+  <text class="sm" x="685" y="100" text-anchor="middle">via svc-sidecar</text>
+  <path class="ln" d="M626 84 H574" marker-end="url(#ar)"/>
+</svg>
+<figcaption>图 4-11　改了 GitHub 上的 index.html，刷新网页就能看到变化</figcaption>
+</figure>
+
+<div class="code" data-lang="yaml" data-file="pods/initsidecar.yml">
+<pre>
+apiVersion: v1
+kind: Pod
+metadata:
+  name: git-sync
+  labels:
+    app: sidecar
+spec:
+  initContainers:
+  - name: ctr-sync
+    restartPolicy: Always          # ← 就是这一行让它成为 sidecar
+    image: k8s.gcr.io/git-sync:v3.1.6
+    volumeMounts:
+    - name: html
+      mountPath: /tmp/git
+    env:
+    - name: GIT_SYNC_REPO
+      value: https://github.com/nigelpoulton/ps-sidecar.git   # 改成你 fork 的地址
+    - name: GIT_SYNC_BRANCH
+      value: master
+    - name: GIT_SYNC_DEPTH
+      value: "1"
+    - name: GIT_SYNC_DEST
+      value: "html"
+  containers:
+  - name: ctr-web
+    image: nginx
+    volumeMounts:
+    - name: html
+      mountPath: /usr/share/nginx/
+  volumes:
+  - name: html
+    emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: svc-sidecar
+spec:
+  selector:
+    app: sidecar
+  ports:
+  - port: 80
+  type: LoadBalancer
+</pre>
+</div>
+
+<p>需要 Kubernetes v1.33+ 和一个免费的 GitHub 账号。步骤：</p>
+<ol class="steps">
+  <li>打开 <code>https://github.com/nigelpoulton/ps-sidecar</code>，点 <strong>Fork</strong> 创建你自己的副本，复制它的 URL。</li>
+  <li>编辑 <code>initsidecar.yml</code>，把 URL 填进 <code>GIT_SYNC_REPO</code>。</li>
+  <li>部署：<code>kubectl apply -f initsidecar.yml</code>（会同时创建 Pod 和 Service）。</li>
+  <li>运行 <code>kubectl get svc svc-sidecar</code>，复制 <code>EXTERNAL-IP</code> 在浏览器打开（Docker Desktop 用 <code>localhost</code>），看到 <em>This is version 1.0</em>。</li>
+  <li>在你 fork 的仓库里修改 <code>index.html</code> 的 <code>&lt;h1&gt;</code> 并提交。</li>
+  <li>刷新网页，看到你的修改——证明 sidecar 一直在运行并同步内容。</li>
+</ol>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl get pods
+NAME       READY   STATUS    RESTARTS   AGE
+git-sync   2/2     Running   0          14s
+
+$ kubectl describe pod git-sync
+...
+Events:
+  Reason   Age   Message
+  ------   ----  -------
+  Created  21s   spec.initContainers{ctr-sync}: Container created
+  Started  21s   spec.initContainers{ctr-sync}: Container started
+  Pulling  17s   spec.containers{ctr-web}: Pulling image "nginx"
+  Created  15s   spec.containers{ctr-web}: Container created
+  Started  15s   spec.containers{ctr-web}: Container started
+</pre>
+</div>
+
+<p>时间戳证明：sidecar <code>ctr-sync</code> 在主容器 <code>ctr-web</code> 之前启动。</p>
+
+<h2 id="cleanup">清理</h2>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl delete pod hello-pod initpod git-sync
+$ kubectl delete svc k8sbook svc-sidecar
+
+# 或者通过 YAML 文件删除
+$ kubectl delete -f initsidecar.yml -f initpod.yml -f pod.yml -f initsvc.yml
+</pre>
+</div>
+
+<h2 id="summary">小结</h2>
+<ul>
+  <li>Kubernetes 上一切应用都运行在 Pod 里；Pod 抽象了容器、Wasm、Serverless（Knative）、VM（KubeVirt）等工作负载。</li>
+  <li>Pod 是共享的执行环境（网络、卷、内存、进程树、主机名），并带来调度、探针、重启策略、安全策略等能力。</li>
+  <li>Pod 会死且不可变：Kubernetes 只会<strong>替换</strong> Pod，而 kubelet 可以按 <code>restartPolicy</code> <strong>重启容器</strong>。</li>
+  <li>所有 Pod 接入一个由 CNI 插件实现的扁平 Pod 网络。</li>
+  <li>init 容器在主容器前跑完一次；sidecar 写在 <code>initContainers</code> 里并设 <code>restartPolicy: Always</code>，与主容器全程陪跑。</li>
+  <li>requests 用于调度和预留，limits 用于封顶；每个 Pod 都应该设置。</li>
+  <li>实际工作中几乎总是通过 Deployment 等控制器来部署 Pod。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>部署 <code>pod.yml</code>，分别用 <code>-o wide</code>、<code>-o yaml</code> 查看，在 YAML 中找出 <code>spec</code> 和 <code>status</code> 的分界。</li>
+    <li>先部署 <code>initpod.yml</code>，观察 <code>Init:0/1</code>；等一分钟后再部署 <code>initsvc.yml</code>，用 <code>--watch</code> 看状态变化。</li>
+    <li>用 <code>kubectl edit</code> 尝试修改 <code>hello-pod</code> 的容器端口，记录报错信息。再试试修改它的标签（labels）——能改吗？想想为什么。</li>
+    <li>把 <code>pod.yml</code> 里的 <code>memory</code> 改成一个大得离谱的值（比如 <code>500Gi</code>）再部署，用 <code>kubectl describe</code> 看看 Events 里调度器说了什么。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

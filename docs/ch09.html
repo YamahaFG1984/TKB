@@ -1,0 +1,602 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 9 章 · 服务发现深入 — Kubernetes 入门实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="9">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 9 章</span>
+<h1>服务发现深入</h1>
+<p class="lede">
+  一个繁忙的集群上跑着成百上千个微服务。应用 A 怎么找到应用 B？答案是 <strong>服务发现</strong>：
+  Kubernetes 自动把每个 Service 的名字登记到集群 DNS，再让每个容器都去问这个 DNS。
+  这一章把「名字 → IP → Pod」这条链路的每一环都拆开看，最后教你怎么排查 DNS 问题。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>理解服务注册表（集群 DNS）由哪些对象组成</li>
+    <li>理解服务<strong>注册</strong>和服务<strong>发现</strong>都是自动的，以及各自的步骤</li>
+    <li>读懂容器里的 <code>/etc/resolv.conf</code></li>
+    <li>搞懂没有路由的 ClusterIP 是怎么把流量送到 Pod 的</li>
+    <li>掌握 FQDN 格式，跨 Namespace 访问 Service</li>
+    <li>学会排查集群 DNS 故障</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="scene">铺垫：应用之间通过 Service 通信</h2>
+
+<p>
+  大多数应用都躲在自己的 Service 后面，拥有可靠的名字和 IP。所以本章说「应用 A 要找应用 B」，指的是<strong>找应用 B 前面的那个 Service</strong>。
+  应用要给别的应用发请求，需要两样东西：
+</p>
+<ol>
+  <li>知道对方的名字（即对方 Service 的名字）——<strong>开发者负责</strong>；</li>
+  <li>把名字转换成 IP 地址——<strong>Kubernetes 负责</strong>。</li>
+</ol>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="服务发现的四个步骤">
+  <rect class="bx-b" x="20" y="70" width="160" height="80" rx="12"/>
+  <text class="ttl on-b" x="100" y="100" text-anchor="middle">app-a</text>
+  <text class="sm" x="100" y="122" text-anchor="middle">配置里写着</text>
+  <text class="mono sm" x="100" y="140" text-anchor="middle">"app-b"</text>
+
+  <rect class="bx-a" x="300" y="14" width="160" height="70" rx="12"/>
+  <text class="ttl on-a" x="380" y="44" text-anchor="middle">Kubernetes</text>
+  <text class="sm" x="380" y="66" text-anchor="middle">（集群 DNS）</text>
+
+  <rect class="bx-g" x="580" y="70" width="160" height="80" rx="12"/>
+  <text class="ttl on-g" x="660" y="100" text-anchor="middle">app-b 的 Service</text>
+  <text class="mono sm" x="660" y="126" text-anchor="middle">10.96.8.8</text>
+
+  <rect class="bx-d" x="20" y="176" width="160" height="40" rx="8"/>
+  <text class="sm" x="100" y="200" text-anchor="middle">① 开发者写好名字（手动）</text>
+  <path class="ln-b" d="M182 92 L296 56" marker-end="url(#ar-b)"/>
+  <text class="sm on-b" x="150" y="40">② app-b 的 IP 是？</text>
+  <path class="ln-a" d="M300 72 L190 104" marker-end="url(#ar-a)"/>
+  <text class="sm on-a" x="236" y="108">③ 10.96.8.8</text>
+  <path class="ln-g" d="M182 130 H576" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="380" y="122" text-anchor="middle">④ 把请求发到 10.96.8.8</text>
+  <text class="sm" x="460" y="200" text-anchor="middle">②③④ 全部由 Kubernetes 自动完成</text>
+</svg>
+<figcaption>图 9-1　只有第 ① 步是手动的</figcaption>
+</figure>
+
+<h2 id="registry">服务注册表：集群 DNS</h2>
+
+<p>
+  服务注册表的工作是维护一份「Service 名字 → IP」的清单。每个 Kubernetes 集群都内置一个<strong>集群 DNS</strong>作为服务注册表。
+  它本身就是一个 Kubernetes 原生应用：由一个 Deployment（通常叫 <code>coredns</code> 或 <code>kube-dns</code>）管理的两个或更多 Pod，前面有一个<strong>永远叫 <code>kube-dns</code></strong> 的 Service。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 270" role="img" aria-label="集群 DNS 的架构">
+  <rect class="bx-a" x="20" y="14" width="360" height="242" rx="14"/>
+  <text class="ttl on-a" x="36" y="38">Namespace kube-system</text>
+  <rect class="bx-b" x="50" y="56" width="300" height="56" rx="10"/>
+  <text class="ttl on-b" x="200" y="80" text-anchor="middle">Service：kube-dns</text>
+  <text class="mono sm" x="200" y="100" text-anchor="middle">10.96.0.10 :53 TCP/UDP</text>
+  <rect class="bx" x="50" y="134" width="300" height="104" rx="10"/>
+  <text class="lbl" x="200" y="156" text-anchor="middle">Deployment：coredns</text>
+  <rect class="bx-g" x="70" y="170" width="120" height="52" rx="8"/>
+  <text class="sm on-g" x="130" y="194" text-anchor="middle">coredns Pod</text><text class="sm" x="130" y="212" text-anchor="middle">名字→IP 表</text>
+  <rect class="bx-g" x="210" y="170" width="120" height="52" rx="8"/>
+  <text class="sm on-g" x="270" y="194" text-anchor="middle">coredns Pod</text><text class="sm" x="270" y="212" text-anchor="middle">名字→IP 表</text>
+  <path class="ln" d="M200 114 V132" marker-end="url(#ar)"/>
+
+  <rect class="bx-p" x="440" y="30" width="300" height="60" rx="10"/>
+  <text class="ttl on-p" x="590" y="54" text-anchor="middle">新 Service：valkyrie-web</text>
+  <text class="sm" x="590" y="76" text-anchor="middle">自动注册名字和 ClusterIP</text>
+  <path class="ln-p" d="M438 64 H354" marker-end="url(#ar)"/>
+  <text class="sm on-p" x="396" y="56" text-anchor="middle">注册</text>
+
+  <rect class="bx" x="440" y="130" width="140" height="56" rx="10"/>
+  <text class="sm" x="510" y="154" text-anchor="middle">容器 A</text><text class="mono sm" x="510" y="172" text-anchor="middle">resolv.conf</text>
+  <rect class="bx" x="600" y="130" width="140" height="56" rx="10"/>
+  <text class="sm" x="670" y="154" text-anchor="middle">容器 B</text><text class="mono sm" x="670" y="172" text-anchor="middle">resolv.conf</text>
+  <path class="ln" d="M438 158 C400 158 400 100 354 92" marker-end="url(#ar)"/>
+  <text class="sm" x="590" y="216" text-anchor="middle">每个容器都被自动配置成</text>
+  <text class="sm" x="590" y="234" text-anchor="middle">向 10.96.0.10 查询名字（服务发现）</text>
+</svg>
+<figcaption>图 9-2　集群 DNS = Deployment + Pod + 名为 kube-dns 的 Service</figcaption>
+</figure>
+
+<p>这些对象都带有 <code>k8s-app=kube-dns</code> 标签，用它就能找到：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl get pods -n kube-system -l k8s-app=kube-dns
+NAME                       READY   STATUS    RESTARTS   AGE
+coredns-76f75df574-d6nn5   1/1     Running   0          6h55m
+coredns-76f75df574-n7qzk   1/1     Running   0          6h55m
+
+$ kubectl get deploy -n kube-system -l k8s-app=kube-dns
+NAME      READY   UP-TO-DATE   AVAILABLE   AGE
+coredns   2/2     2            2           6h55m
+
+$ kubectl get svc -n kube-system -l k8s-app=kube-dns
+NAME       TYPE        CLUSTER-IP   EXTERNAL-IP   PORT(S)                  AGE
+kube-dns   ClusterIP   10.96.0.10   &lt;none&gt;        53/UDP,53/TCP,9153/TCP   6h55m
+</pre>
+</div>
+
+<p>Pod 通常使用 <code>registry.k8s.io/coredns/coredns</code> 镜像。Service 名字永远是 <code>kube-dns</code>，但 IP 每个集群不同。</p>
+
+<h2 id="registration">服务注册：全自动</h2>
+
+<p>服务注册分三步：</p>
+<ol>
+  <li>给 Service 起个名字——<strong>开发者</strong>；</li>
+  <li>给 Service 分配一个 IP——<strong>Kubernetes</strong>；</li>
+  <li>把名字和 IP 登记到集群 DNS——<strong>Kubernetes</strong>。</li>
+</ol>
+
+<p>
+  例如你把新应用部署在一个叫 <code>valkyrie-web</code> 的 Service 后面，Kubernetes 会确保名字唯一，自动分配 ClusterIP，并把它登记到集群 DNS。
+  之所以是自动的，是因为集群 DNS 本身就是一个<strong>监视 API 服务器上新 Service 的控制器</strong>。你的应用里完全不需要写任何注册逻辑。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 270" role="img" aria-label="服务注册流程">
+  <rect class="bx" x="20" y="20" width="140" height="56" rx="10"/>
+  <text class="sm" x="90" y="44" text-anchor="middle">YAML：</text>
+  <text class="sm" x="90" y="62" text-anchor="middle">Deployment + Service</text>
+  <rect class="bx-b" x="200" y="20" width="160" height="56" rx="10"/>
+  <text class="sm on-b" x="280" y="44" text-anchor="middle">API 服务器</text>
+  <text class="sm" x="280" y="62" text-anchor="middle">认证、授权</text>
+  <rect class="bx-b" x="400" y="20" width="160" height="56" rx="10"/>
+  <text class="sm on-b" x="480" y="44" text-anchor="middle">分配 ClusterIP</text>
+  <text class="sm" x="480" y="62" text-anchor="middle">配置存入 etcd</text>
+  <path class="ln" d="M162 48 H196" marker-end="url(#ar)"/>
+  <path class="ln" d="M362 48 H396" marker-end="url(#ar)"/>
+
+  <text class="sm" x="660" y="40" text-anchor="middle">三个「观察者」</text>
+  <text class="sm" x="660" y="58" text-anchor="middle">同时发现新对象 ↓</text>
+
+  <rect class="bx-g" x="20" y="120" width="230" height="110" rx="12"/>
+  <text class="ttl on-g" x="135" y="146" text-anchor="middle">集群 DNS（CoreDNS）</text>
+  <text class="sm" x="36" y="172">登记 DNS 记录：</text>
+  <text class="sm" x="36" y="192">A 记录（名字 → IP）</text>
+  <text class="sm" x="36" y="212">SRV 记录（端口信息）</text>
+
+  <rect class="bx-p" x="265" y="120" width="230" height="110" rx="12"/>
+  <text class="ttl on-p" x="380" y="146" text-anchor="middle">EndpointSlice 控制器</text>
+  <text class="sm" x="281" y="172">创建 EndpointSlice，</text>
+  <text class="sm" x="281" y="192">保存匹配标签选择器的</text>
+  <text class="sm" x="281" y="212">健康 Pod IP 列表</text>
+
+  <rect class="bx-a" x="510" y="120" width="230" height="110" rx="12"/>
+  <text class="ttl on-a" x="625" y="146" text-anchor="middle">每个节点上的 kube-proxy</text>
+  <text class="sm" x="526" y="172">在内核里创建本地规则</text>
+  <text class="sm" x="526" y="192">（IPVS / iptables），把发往</text>
+  <text class="sm" x="526" y="212">ClusterIP 的流量转给 Pod</text>
+
+  <path class="ln-d" d="M480 78 L135 116"/>
+  <path class="ln-d" d="M480 78 L380 116"/>
+  <path class="ln-d" d="M480 78 L625 116"/>
+  <text class="sm" x="380" y="256" text-anchor="middle">它们都是「监视 API 服务器 → 调和」的控制器，和第 2 章讲的一模一样</text>
+</svg>
+<figcaption>图 9-3　服务注册流程</figcaption>
+</figure>
+
+<h2 id="discovery">服务发现：把名字变成 IP</h2>
+
+<p>假设集群里有两个应用：</p>
+
+<div class="tw">
+<table>
+  <tr><th>应用</th><th>Service 名</th><th>ClusterIP</th></tr>
+  <tr><td>enterprise</td><td><code>ent</code></td><td>192.168.201.240</td></tr>
+  <tr><td>cerritos</td><td><code>cer</code></td><td>192.168.200.217</td></tr>
+</table>
+</div>
+
+<p>
+  enterprise 要访问 cerritos，开发者需要把 <code>cer</code> 这个名字配置进 enterprise。剩下的事 Kubernetes 来做：
+  它会自动配置<strong>每个容器</strong>的 <code>/etc/resolv.conf</code>，填上集群 DNS 的 IP，并加上<strong>搜索域（search domain）</strong>。
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ cat /etc/resolv.conf
+search default.svc.cluster.local svc.cluster.local cluster.local
+nameserver 10.96.0.10        # 集群内部 DNS（kube-dns Service）的 ClusterIP
+options ndots:5
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="短名字通过搜索域补全为完全限定域名">
+  <rect class="bx-b" x="20" y="70" width="120" height="56" rx="10"/>
+  <text class="sm" x="80" y="94" text-anchor="middle">应用请求</text>
+  <text class="mono ttl on-b" x="80" y="114" text-anchor="middle">cer</text>
+  <text class="sm" x="80" y="150" text-anchor="middle">短名字（非限定）</text>
+
+  <rect class="bx" x="190" y="30" width="330" height="136" rx="12"/>
+  <text class="ttl" x="355" y="54" text-anchor="middle">依次尝试 search 列表补全</text>
+  <text class="mono sm on-g" x="210" y="84">cer.default.svc.cluster.local ✓</text>
+  <text class="mono sm" x="210" y="108">cer.svc.cluster.local</text>
+  <text class="mono sm" x="210" y="132">cer.cluster.local</text>
+  <text class="sm" x="355" y="156" text-anchor="middle">第一个就命中了本 Namespace 的 Service</text>
+
+  <rect class="bx-g" x="570" y="70" width="170" height="56" rx="10"/>
+  <text class="sm" x="655" y="94" text-anchor="middle">集群 DNS 返回</text>
+  <text class="mono sm on-g" x="655" y="114" text-anchor="middle">192.168.200.217</text>
+
+  <path class="ln" d="M142 98 H186" marker-end="url(#ar)"/>
+  <path class="ln-g" d="M522 98 H566" marker-end="url(#ar-g)"/>
+</svg>
+<figcaption>图 9-4　短名字 + 搜索域 = 完全限定域名（FQDN）</figcaption>
+</figure>
+
+<p>可以验证：<code>resolv.conf</code> 里的 nameserver 正是 <code>kube-dns</code> Service 的 ClusterIP。</p>
+
+<h3>ClusterIP 路由：没有路的 IP 怎么走？</h3>
+
+<p>
+  拿到 ClusterIP 后还有最后一个谜题：ClusterIP 位于一个叫<strong>服务网络（service network）</strong>的特殊网络上，而<strong>到这个网络根本没有路由</strong>！
+</p>
+
+<div class="box note">
+  <div class="t">&#9432; 术语：默认网关</div>
+  <p>系统不知道把流量发往哪里时，就发给<strong>默认网关</strong>；默认网关再转给下一个设备，希望它知道该怎么走。</p>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="ClusterIP 流量被节点内核中的 kube-proxy 规则拦截并改写到 Pod IP">
+  <rect class="bx-d" x="20" y="14" width="500" height="262" rx="14"/>
+  <text class="sm" x="36" y="34">节点</text>
+  <rect class="bx-b" x="40" y="46" width="200" height="70" rx="10"/>
+  <text class="ttl on-b" x="140" y="72" text-anchor="middle">enterprise 容器</text>
+  <text class="sm" x="140" y="92" text-anchor="middle">发往 192.168.200.217</text>
+  <text class="sm" x="140" y="108" text-anchor="middle">没有路由 → 交给默认网关</text>
+
+  <rect class="bx" x="40" y="150" width="200" height="56" rx="10"/>
+  <text class="lbl" x="140" y="174" text-anchor="middle">节点网络栈</text>
+  <text class="sm" x="140" y="194" text-anchor="middle">也没有路由 → 默认网关</text>
+  <path class="ln" d="M140 118 V146" marker-end="url(#ar)"/>
+
+  <rect class="bx-a" x="280" y="100" width="220" height="156" rx="12"/>
+  <text class="ttl on-a" x="390" y="126" text-anchor="middle">节点内核</text>
+  <text class="sm" x="296" y="152">kube-proxy 早已写好的规则：</text>
+  <text class="mono sm" x="296" y="176">192.168.200.217:8080</text>
+  <text class="mono sm" x="296" y="196">  → 10.244.1.9:8080</text>
+  <text class="mono sm" x="296" y="216">  → 10.244.2.4:8080</text>
+  <text class="sm on-a" x="296" y="242">拦截！改写目标为 Pod IP</text>
+  <path class="ln-a" d="M242 178 H276" marker-end="url(#ar-a)"/>
+  <text class="sm" x="258" y="170" text-anchor="middle">陷入</text>
+
+  <rect class="bx-g" x="570" y="120" width="170" height="70" rx="12"/>
+  <text class="ttl on-g" x="655" y="148" text-anchor="middle">cerritos Pod</text>
+  <text class="mono sm" x="655" y="170" text-anchor="middle">10.244.1.9</text>
+  <path class="ln-g" d="M502 160 H566" marker-end="url(#ar-g)"/>
+  <text class="sm" x="534" y="150" text-anchor="middle">Pod 网络</text>
+
+  <rect class="bx" x="560" y="30" width="180" height="62" rx="10"/>
+  <text class="sm" x="650" y="54" text-anchor="middle">kube-proxy 持续监视</text>
+  <text class="sm" x="650" y="72" text-anchor="middle">Service 和 EndpointSlice</text>
+  <path class="ln-d" d="M558 70 C520 70 470 80 450 98"/>
+</svg>
+<figcaption>图 9-5　ClusterIP 是「虚拟 IP」：真正的转发靠每个节点内核里的规则</figcaption>
+</figure>
+
+<p>
+  容器的默认网关把流量交给所在节点，节点也没有到服务网络的路由，于是又发给自己的默认网关——这就让<strong>节点内核</strong>处理了这个流量，魔法就在这里发生。
+  每个节点上运行的 <strong>kube-proxy</strong> 是一个监视 Service 和 EndpointSlice 的控制器，它在内核里写好规则，把发往 ClusterIP 的流量拦截下来，重定向到某个健康 Pod 的 IP。
+</p>
+
+<div class="box key">
+  <div class="t">&#9733; 一句话串起整条链路</div>
+  <p>
+    应用请求 <code>cer</code> → 容器按 <code>resolv.conf</code> 问集群 DNS → 拿到 ClusterIP → 发往 ClusterIP（没有路由，走默认网关）
+    → 节点内核按 kube-proxy 的规则改写成 Pod IP → 到达 cerritos 的某个 Pod。
+  </p>
+</div>
+
+<h2 id="namespaces">服务发现与 Namespace</h2>
+
+<p>
+  每个对象都在集群的地址空间里有个名字。这个地址空间是一个 DNS 域，叫<strong>集群域（cluster domain）</strong>，大多数集群是 <code>cluster.local</code>。
+  Namespace 把这个地址空间再划分开：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 130" role="img" aria-label="FQDN 的组成">
+  <text class="mono ttl" x="380" y="44" text-anchor="middle" style="font-size:20px">
+    <tspan class="on-b">cer</tspan>.<tspan class="on-a">prod</tspan>.<tspan class="on-p">svc</tspan>.<tspan class="on-g">cluster.local</tspan>
+  </text>
+  <text class="sm on-b" x="220" y="84" text-anchor="middle">Service 名</text>
+  <text class="sm on-a" x="320" y="84" text-anchor="middle">Namespace</text>
+  <text class="sm on-p" x="410" y="84" text-anchor="middle">固定的 svc</text>
+  <text class="sm on-g" x="530" y="84" text-anchor="middle">集群域</text>
+  <path class="ln-b" d="M290 56 L230 72"/><path class="ln-a" d="M345 56 L325 72"/>
+  <path class="ln-p" d="M395 56 L408 72"/><path class="ln-g" d="M475 56 L525 72"/>
+  <text class="sm" x="380" y="116" text-anchor="middle">格式：&lt;对象名&gt;.&lt;namespace&gt;.svc.cluster.local</text>
+</svg>
+<figcaption>图 9-6　完全限定域名（FQDN）</figcaption>
+</figure>
+
+<p>
+  对象名在同一 Namespace 内必须唯一，但不同 Namespace 之间可以重名。所以可以在同一集群的 <code>dev</code> 和 <code>prod</code> 里跑两套完全相同的配置。
+  规则很简单：<strong>同一 Namespace 内用短名字，跨 Namespace 必须用 FQDN</strong>。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 260" role="img" aria-label="dev 和 prod 两个 Namespace 中有同名的 ent Service">
+  <rect class="bx-b" x="20" y="14" width="340" height="230" rx="14"/>
+  <text class="ttl on-b" x="36" y="40">Namespace：dev</text>
+  <rect class="bx-a" x="40" y="58" width="130" height="66" rx="10"/>
+  <text class="ttl on-a" x="105" y="84" text-anchor="middle">jump Pod</text>
+  <text class="sm" x="105" y="106" text-anchor="middle">ubuntu</text>
+  <rect class="bx" x="200" y="58" width="140" height="66" rx="10"/>
+  <text class="ttl" x="270" y="84" text-anchor="middle">Service ent</text>
+  <text class="sm" x="270" y="106" text-anchor="middle">:8080</text>
+  <rect class="bx-g" x="200" y="150" width="140" height="74" rx="10"/>
+  <text class="sm on-g" x="270" y="174" text-anchor="middle">enterprise × 2</text>
+  <text class="mono sm" x="270" y="196" text-anchor="middle">k8sbook:text-dev</text>
+  <text class="sm" x="270" y="214" text-anchor="middle">"Hello from DEV"</text>
+  <path class="ln" d="M270 126 V146" marker-end="url(#ar)"/>
+  <path class="ln-a" d="M172 90 H196" marker-end="url(#ar-a)"/>
+  <text class="mono sm on-a" x="105" y="160" text-anchor="middle">curl ent:8080</text>
+  <text class="sm" x="105" y="180" text-anchor="middle">短名字 → 本 NS</text>
+
+  <rect class="bx-p" x="400" y="14" width="340" height="230" rx="14"/>
+  <text class="ttl on-p" x="416" y="40">Namespace：prod</text>
+  <rect class="bx" x="580" y="58" width="140" height="66" rx="10"/>
+  <text class="ttl" x="650" y="84" text-anchor="middle">Service ent</text>
+  <text class="sm" x="650" y="106" text-anchor="middle">:8080</text>
+  <rect class="bx-g" x="580" y="150" width="140" height="74" rx="10"/>
+  <text class="sm on-g" x="650" y="174" text-anchor="middle">enterprise × 2</text>
+  <text class="mono sm" x="650" y="196" text-anchor="middle">k8sbook:text-prod</text>
+  <text class="sm" x="650" y="214" text-anchor="middle">"Hello from PROD"</text>
+  <path class="ln" d="M650 126 V146" marker-end="url(#ar)"/>
+  <path class="ln-a" d="M150 56 C220 6 520 6 600 54" marker-end="url(#ar-a)"/>
+  <text class="mono sm on-a" x="490" y="140" text-anchor="middle">curl ent.prod.svc</text>
+  <text class="mono sm on-a" x="490" y="158" text-anchor="middle">.cluster.local:8080</text>
+  <text class="sm" x="490" y="180" text-anchor="middle">FQDN → 跨 NS</text>
+</svg>
+<figcaption>图 9-7　同名 Service 在不同 Namespace 中互不冲突</figcaption>
+</figure>
+
+<h2 id="handson">动手：同 Namespace 与跨 Namespace 访问</h2>
+
+<p><code>service-discovery/sd-example.yml</code> 定义了两个 Namespace、两个同名 Deployment、两个同名 Service，以及只在 dev 里的一个 jump Pod：</p>
+
+<div class="code" data-lang="yaml" data-file="service-discovery/sd-example.yml（节选）">
+<pre>
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dev
+---
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: enterprise
+  namespace: dev
+spec:
+  selector:
+    matchLabels:
+      app: enterprise
+  replicas: 2
+  template:
+    metadata:
+      labels:
+        app: enterprise
+    spec:
+      terminationGracePeriodSeconds: 1
+      containers:
+      - image: nigelpoulton/k8sbook:text-dev    # prod 里用 text-prod
+        name: enterprise-ctr
+        ports:
+        - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ent
+  namespace: dev                                # prod 里有一个同名的
+spec:
+  ports:
+  - port: 8080
+  selector:
+    app: enterprise
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: jump
+  namespace: dev
+spec:
+  terminationGracePeriodSeconds: 5
+  containers:
+  - image: ubuntu
+    name: jump
+    tty: true
+    stdin: true
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 示例应用长什么样</div>
+  <p>
+    镜像 <code>k8sbook:text-dev</code> 的源码在仓库的 <code>web-app/text/main.go</code>：一个极简的 Go Web 服务器，
+    在 8080 端口返回 <code>Hello from the DEV Namespace!</code> 和自己的主机名（也就是 Pod 名），正好用来判断请求到底落在了哪个 Namespace 的哪个 Pod 上。
+  </p>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f sd-example.yml
+namespace/dev created
+namespace/prod created
+deployment.apps/enterprise created
+deployment.apps/enterprise created
+service/ent created
+service/ent created
+pod/jump created
+
+$ kubectl get all --namespace dev
+$ kubectl get all --namespace prod
+</pre>
+</div>
+
+<p>登录 dev 里的 jump Pod，看看它的 <code>resolv.conf</code>：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl exec -it jump --namespace dev -- bash
+root@jump:/# cat /etc/resolv.conf
+search dev.svc.cluster.local svc.cluster.local cluster.local
+nameserver 10.96.0.10
+options ndots:5
+
+root@jump:/# apt-get update &amp;&amp; apt-get install curl -y
+
+root@jump:/# curl ent:8080
+Hello from the DEV Namespace!
+Hostname: enterprise-76fc64bd9-lvzsn
+
+root@jump:/# curl ent.prod.svc.cluster.local:8080
+Hello from the PROD Namespace!
+Hostname: enterprise-5cfcd578d7-nvzlp
+
+root@jump:/# exit
+</pre>
+</div>
+
+<p>
+  注意搜索域的第一项是 <code>dev.svc.cluster.local</code>——容器所在的 Namespace。所以短名字 <code>ent</code> 被补全成 dev 里的 Service；
+  要访问 prod 的，就得写完整的 FQDN。
+</p>
+
+<h2 id="troubleshoot">排查服务发现问题</h2>
+
+<p>集群 DNS 的关键组件都在 <code>kube-system</code> 里，并带有 <code>k8s-app=kube-dns</code> 标签：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 170" role="img" aria-label="DNS 排查的四个检查点">
+  <rect class="bx-b" x="20" y="20" width="168" height="110" rx="12"/>
+  <text class="ttl on-b" x="104" y="46" text-anchor="middle">① Deployment/Pod</text>
+  <text class="sm" x="104" y="72" text-anchor="middle">coredns 都在</text>
+  <text class="sm" x="104" y="90" text-anchor="middle">Running 吗？</text>
+  <rect class="bx-p" x="204" y="20" width="168" height="110" rx="12"/>
+  <text class="ttl on-p" x="288" y="46" text-anchor="middle">② 日志</text>
+  <text class="sm" x="288" y="72" text-anchor="middle">kubectl logs</text>
+  <text class="sm" x="288" y="90" text-anchor="middle">有没有报错？</text>
+  <rect class="bx-a" x="388" y="20" width="168" height="110" rx="12"/>
+  <text class="ttl on-a" x="472" y="46" text-anchor="middle">③ Service</text>
+  <text class="sm" x="472" y="72" text-anchor="middle">kube-dns 的 IP</text>
+  <text class="sm" x="472" y="90" text-anchor="middle">= resolv.conf 里的？</text>
+  <rect class="bx-g" x="572" y="20" width="168" height="110" rx="12"/>
+  <text class="ttl on-g" x="656" y="46" text-anchor="middle">④ EndpointSlice</text>
+  <text class="sm" x="656" y="72" text-anchor="middle">有 coredns Pod 的</text>
+  <text class="sm" x="656" y="90" text-anchor="middle">IP 和 53 端口吗？</text>
+  <path class="ln" d="M190 75 H200" marker-end="url(#ar)"/>
+  <path class="ln" d="M374 75 H384" marker-end="url(#ar)"/>
+  <path class="ln" d="M558 75 H568" marker-end="url(#ar)"/>
+  <text class="sm" x="380" y="158" text-anchor="middle">都正常？再起一个带网络工具的 Pod，用 nslookup 深入测试</text>
+</svg>
+<figcaption>图 9-8　从下往上逐层检查集群 DNS</figcaption>
+</figure>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl get deploy -n kube-system -l k8s-app=kube-dns
+$ kubectl get pods -n kube-system -l k8s-app=kube-dns
+
+$ kubectl logs coredns-76f75df574-n7qzk -n kube-system
+maxprocs: Leaving GOMAXPROCS=8: CPU quota undefined
+.:53
+[INFO] plugin/reload: Running configuration SHA512 = 1b226df7...
+CoreDNS-1.13.1
+linux/arm64, go1.25.2, 1db4568
+
+$ kubectl get svc kube-dns -n kube-system
+NAME       TYPE        CLUSTER-IP   EXTERNAL-IP   PORT(S)                  AGE
+kube-dns   ClusterIP   10.96.0.10   &lt;none&gt;        53/UDP,53/TCP,9153/TCP   7h5m
+
+$ kubectl get endpointslice -n kube-system -l k8s-app=kube-dns
+NAME             ADDRESSTYPE   PORTS        ENDPOINTS                AGE
+kube-dns-jb72g   IPv4          9153,53,53   10.244.1.9,10.244.1.14   7h5m
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; IP 必须对得上</div>
+  <p><code>kube-dns</code> Service 的 ClusterIP 必须和所有容器 <code>/etc/resolv.conf</code> 里的 nameserver 一致，否则容器会把 DNS 查询发错地方。</p>
+</div>
+
+<h3>用 dnsutils Pod 深入测试</h3>
+
+<p>启动一个带 ping、curl、dig、nslookup 等工具的排障 Pod（<code>jessie-dnsutils</code> 是常用选择）：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl run -it dnsutils \
+  --image registry.k8s.io/e2e-test-images/jessie-dnsutils:1.7
+
+# nslookup kubernetes
+Server:     10.96.0.10
+Address:    10.96.0.10#53
+
+Name:       kubernetes.default.svc.cluster.local
+Address:    10.96.0.1
+</pre>
+</div>
+
+<p>
+  <code>kubernetes</code> 这个 Service 每个集群都有（它把 API 服务器暴露给所有 Pod），是测试 DNS 的好目标。
+  前两行应该是集群 DNS 的 IP，后两行是 <code>kubernetes</code> Service 的 FQDN 和 ClusterIP（可以用 <code>kubectl get svc kubernetes</code> 核对）。
+  如果出现 <em>nslookup: can't resolve kubernetes</em>，说明 DNS 有问题，一个简单的修复办法是删掉 coredns Pod，让 Deployment 重建它们：
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl delete pod -n kube-system -l k8s-app=kube-dns
+pod "coredns-76f75df574-d6nn5" deleted
+pod "coredns-76f75df574-n7qzk" deleted
+</pre>
+</div>
+
+<h2 id="cleanup">清理</h2>
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl delete pod dnsutils
+$ kubectl delete -f sd-example.yml
+</pre>
+</div>
+
+<h2 id="summary">小结</h2>
+<ul>
+  <li>Kubernetes 用内部的<strong>集群 DNS</strong>做服务注册表：一个监视新 Service 并自动登记名字和 IP 的原生应用（coredns Pod + kube-dns Service）。</li>
+  <li>每个节点的 kubelet 把所有容器配置成使用集群 DNS 做服务发现（<code>/etc/resolv.conf</code>）。</li>
+  <li>集群 DNS 把 Service 名解析成 ClusterIP——服务网络上的稳定虚拟 IP。这个网络没有路由，但 kube-proxy 让每个节点把 ClusterIP 流量重定向到 Pod 网络上的 Pod IP。</li>
+  <li>同 Namespace 用短名字，跨 Namespace 用 <code>&lt;名字&gt;.&lt;namespace&gt;.svc.cluster.local</code>。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>在 jump Pod 里试试 <code>curl ent.prod:8080</code>（只写到 Namespace）能不能通？对照 <code>resolv.conf</code> 的 search 列表解释原因。</li>
+    <li>在 dnsutils Pod 里运行 <code>nslookup ent.dev.svc.cluster.local</code>，把返回的 IP 和 <code>kubectl get svc ent -n dev</code> 对比。</li>
+    <li>把 dev 里的 enterprise 缩容到 0（<code>kubectl scale deploy enterprise -n dev --replicas 0</code>），DNS 还能解析出 <code>ent</code> 吗？curl 呢？想想 DNS 和 EndpointSlice 分别负责什么。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

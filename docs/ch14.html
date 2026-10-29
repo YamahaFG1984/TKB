@@ -1,0 +1,683 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 14 章 · Kubernetes API — Kubernetes 入门实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="14">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 14 章</span>
+<h1>Kubernetes API</h1>
+<p class="lede">
+  想精通 Kubernetes，就得理解它的 API。它庞大而复杂，如果你对 API、RESTful 这些词不熟，很容易被绕晕。
+  这一章用一个网购的比喻打底，再亲手用 <code>curl</code> 直接和 API 服务器对话，最后创建一个属于你自己的 API 资源。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>理解「以 API 为中心」的含义，以及序列化（JSON / Protobuf）</li>
+    <li>理解 RESTful、CRUD、动词与 HTTP 方法的对应</li>
+    <li>用 <code>kubectl proxy</code> + <code>curl</code> 直接调用 API</li>
+    <li>分清核心 API 组（<code>/api/v1</code>）和命名 API 组（<code>/apis/&lt;group&gt;/&lt;version&gt;</code>）</li>
+    <li>理解 alpha → beta → GA 的演进和弃用策略</li>
+    <li>用 CRD 扩展 API</li>
+  </ul>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 资源还是对象？</div>
+  <p>Pod、Service、StatefulSet、StorageClass 等都是 API 里的<strong>资源（resource）</strong>，部署到集群后常被称为<strong>对象（object）</strong>。本章两个词混用。</p>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="big-picture">以 API 为中心</h2>
+
+<p>
+  Kubernetes 以 API 为中心：所有资源都定义在 API 里，所有配置和查询都通过 API 服务器。管理员和客户端可以用 kubectl、自己写的代码或 API 测试工具发请求，
+  但无论怎么发，请求都会到达 API 服务器，经过认证和授权后才被接受。如果是创建请求，Kubernetes 会把对象定义以<strong>序列化</strong>的形式持久化到集群存储，然后调度到集群上。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="所有客户端都通过 API 服务器与集群交互">
+  <rect class="bx" x="20" y="20" width="150" height="40" rx="8"/><text class="sm" x="95" y="45" text-anchor="middle">kubectl</text>
+  <rect class="bx" x="20" y="72" width="150" height="40" rx="8"/><text class="sm" x="95" y="97" text-anchor="middle">自己写的代码 / Postman</text>
+  <rect class="bx" x="20" y="124" width="150" height="40" rx="8"/><text class="sm" x="95" y="149" text-anchor="middle">kubelet（每个节点）</text>
+  <rect class="bx" x="20" y="176" width="150" height="40" rx="8"/><text class="sm" x="95" y="201" text-anchor="middle">控制平面服务、控制器</text>
+
+  <rect class="bx-b" x="260" y="56" width="220" height="124" rx="14"/>
+  <text class="ttl on-b" x="370" y="84" text-anchor="middle">API 服务器</text>
+  <text class="sm" x="370" y="108" text-anchor="middle">HTTPS · RESTful</text>
+  <text class="sm" x="370" y="128" text-anchor="middle">认证 → 授权 → 准入</text>
+  <text class="sm" x="370" y="148" text-anchor="middle">端口通常是 443 或 6443</text>
+
+  <rect class="bx-g" x="570" y="40" width="170" height="60" rx="12"/>
+  <text class="ttl on-g" x="655" y="66" text-anchor="middle">集群存储 etcd</text>
+  <text class="sm" x="655" y="86" text-anchor="middle">序列化后的对象</text>
+  <rect class="bx-a" x="570" y="136" width="170" height="60" rx="12"/>
+  <text class="ttl on-a" x="655" y="162" text-anchor="middle">API（资源定义）</text>
+  <text class="sm" x="655" y="182" text-anchor="middle">Pod、Service……</text>
+
+  <path class="ln" d="M172 40 L256 90" marker-end="url(#ar)"/>
+  <path class="ln" d="M172 92 L256 108" marker-end="url(#ar)"/>
+  <path class="ln" d="M172 144 L256 128" marker-end="url(#ar)"/>
+  <path class="ln" d="M172 196 L256 148" marker-end="url(#ar)"/>
+  <path class="ln-g" d="M482 96 L566 74" marker-end="url(#ar-g)"/>
+  <path class="ln-a" d="M482 140 L566 162" marker-start="url(#ar-a)"/>
+  <text class="sm" x="380" y="232" text-anchor="middle">像纽约中央车站：所有人都通过 REST 调用 API 服务器来互相交流</text>
+</svg>
+<figcaption>图 14-1　API 服务器是一切交互的中枢</figcaption>
+</figure>
+
+<h3>JSON 序列化</h3>
+
+<p>
+  <strong>序列化</strong>就是把对象转换成字符串或字节流，以便通过网络发送或持久化到数据存储；反过来叫<strong>反序列化</strong>。
+  Kubernetes 把 Pod、Service 这些对象序列化成 JSON 字符串，通过 HTTP 传输：kubectl 提交对象时序列化，API 服务器返回响应时也序列化。存入集群存储时同样要序列化。
+</p>
+
+<div class="cards">
+  <div class="card"><span class="ic">&#128196;</span><h4>JSON</h4><p>人类可读，便于检查和排错。Kubernetes 通常用它与外部客户端通信。</p></div>
+  <div class="card"><span class="ic">&#9889;</span><h4>Protobuf</h4><p>更快、更高效、扩展性更好，但难以直接查看。通常用于集群内部组件之间通信。</p></div>
+</div>
+
+<p>客户端通过请求头声明自己支持的序列化格式，比如只支持 JSON 的客户端会带上 <code>Content-Type: application/json</code>，Kubernetes 就会用 JSON 回应。</p>
+
+<h3>一个网购的比喻</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 260" role="img" aria-label="亚马逊购物与 Kubernetes API 的类比">
+  <text class="ttl" x="190" y="24" text-anchor="middle">亚马逊</text>
+  <text class="ttl" x="570" y="24" text-anchor="middle">Kubernetes</text>
+  <g>
+    <rect class="bx-a" x="40" y="40" width="300" height="38" rx="8"/><text class="sm" x="190" y="64" text-anchor="middle">商品（数据线、书……）</text>
+    <rect class="bx-b" x="420" y="40" width="300" height="38" rx="8"/><text class="sm" x="570" y="64" text-anchor="middle">资源 / 对象（Pod、Service……）</text>
+    <path class="ln-d" d="M342 59 H418"/>
+  </g>
+  <g>
+    <rect class="bx-a" x="40" y="88" width="300" height="38" rx="8"/><text class="sm" x="190" y="112" text-anchor="middle">仓库（商品清单）</text>
+    <rect class="bx-b" x="420" y="88" width="300" height="38" rx="8"/><text class="sm" x="570" y="112" text-anchor="middle">API（资源定义）</text>
+    <path class="ln-d" d="M342 107 H418"/>
+  </g>
+  <g>
+    <rect class="bx-a" x="40" y="136" width="300" height="38" rx="8"/><text class="sm" x="190" y="160" text-anchor="middle">浏览器 / App</text>
+    <rect class="bx-b" x="420" y="136" width="300" height="38" rx="8"/><text class="sm" x="570" y="160" text-anchor="middle">kubectl</text>
+    <path class="ln-d" d="M342 155 H418"/>
+  </g>
+  <g>
+    <rect class="bx-a" x="40" y="184" width="300" height="38" rx="8"/><text class="sm" x="190" y="208" text-anchor="middle">亚马逊网站</text>
+    <rect class="bx-b" x="420" y="184" width="300" height="38" rx="8"/><text class="sm" x="570" y="208" text-anchor="middle">API 服务器</text>
+    <path class="ln-d" d="M342 203 H418"/>
+  </g>
+  <text class="sm" x="380" y="248" text-anchor="middle">网站上没有的东西买不到 —— API 里没有的资源也部署不了</text>
+</svg>
+<figcaption>图 14-2　只是个比喻，不是每一点都完全对应</figcaption>
+</figure>
+
+<ol>
+  <li>商品存在仓库，通过网站展示 ↔ 资源定义在 API 里，通过 API 服务器暴露；</li>
+  <li>你用浏览器搜索下单 ↔ 你用 kubectl 请求资源；</li>
+  <li>第三方卖家也在亚马逊卖货，你用同一个网站购买 ↔ 第三方定义自己的资源（CRD），你用同一个 kubectl 请求；</li>
+  <li>买东西时选颜色、长度、接口 ↔ 配置资源的属性（metadata、重启策略、容器、卷……）；</li>
+  <li>可以跟踪物流 ↔ 可以 watch 对象的创建和部署；</li>
+  <li>可以再下单或退货 ↔ 可以继续创建或删除对象。</li>
+</ol>
+
+<h2 id="api-server">API 服务器</h2>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl cluster-info
+Kubernetes control plane is running at https://kubernetes.docker.internal:6443
+</pre>
+</div>
+
+<p>
+  API 服务器是一个控制平面服务，有些集群把它作为一组 Pod 跑在 <code>kube-system</code> 里。自己管理集群时，要确保控制平面高可用且性能足够，
+  否则 API 响应会变慢甚至完全无法访问；用托管 Kubernetes 时，这些由云厂商负责并对你隐藏。它用 TLS 加密客户端连接，内外部请求都要经过同样的认证和授权。
+</p>
+
+<h3>REST、CRUD 与动词</h3>
+<p>
+  <strong>REST</strong>（REpresentational State Transfer）是与 Web API 通信的业界标准，使用 REST 的系统被称为 <strong>RESTful</strong>。
+  一个 REST 请求由<strong>动词</strong>和<strong>资源路径</strong>组成。<strong>CRUD</strong> 是 Create、Read、Update、Delete 四个基本操作，对应标准的 HTTP 方法：
+</p>
+
+<div class="tw">
+<table>
+  <tr><th>K8s CRUD 动词</th><th>HTTP 方法</th><th>kubectl 示例</th></tr>
+  <tr><td><code>create</code></td><td>POST</td><td><code>kubectl create -f &lt;文件&gt;</code></td></tr>
+  <tr><td><code>get</code>、<code>list</code>、<code>watch</code></td><td>GET</td><td><code>kubectl get pods</code></td></tr>
+  <tr><td><code>update</code></td><td>PUT / PATCH</td><td><code>kubectl edit deployment &lt;名字&gt;</code></td></tr>
+  <tr><td><code>delete</code></td><td>DELETE</td><td><code>kubectl delete service &lt;名字&gt;</code></td></tr>
+</table>
+</div>
+
+<p>注意三者的名字不总是一致，比如 <code>kubectl edit</code> 用的是 <code>update</code> 动词和 HTTP <code>PATCH</code> 方法。</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 140" role="img" aria-label="kubectl 命令转换为 REST 请求">
+  <rect class="bx" x="20" y="40" width="270" height="56" rx="10"/>
+  <text class="mono sm" x="155" y="73" text-anchor="middle">kubectl get pods --namespace shield</text>
+  <path class="ln-a" d="M292 68 H356" marker-end="url(#ar-a)"/>
+  <text class="sm on-a" x="324" y="60" text-anchor="middle">转换</text>
+  <rect class="bx-b" x="360" y="40" width="380" height="56" rx="10"/>
+  <text class="mono ttl" x="380" y="74"><tspan class="on-a">GET</tspan> <tspan class="on-b">/api/v1/namespaces/shield/pods</tspan></text>
+  <text class="sm on-a" x="400" y="120" text-anchor="middle">动词（HTTP 方法）</text>
+  <text class="sm on-b" x="600" y="120" text-anchor="middle">资源的 URI 路径</text>
+</svg>
+<figcaption>图 14-3　REST 请求 = 动词 + 路径</figcaption>
+</figure>
+
+<h2 id="curl">动手：直接调用 API</h2>
+
+<p><code>kubectl proxy</code> 会在本机暴露 API 并替你处理所有认证，这样就能用 curl 之类的工具直接发请求了：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 150" role="img" aria-label="curl 通过 kubectl proxy 访问 API 服务器">
+  <rect class="bx" x="20" y="44" width="160" height="56" rx="10"/>
+  <text class="lbl" x="100" y="70" text-anchor="middle">curl</text>
+  <text class="sm" x="100" y="88" text-anchor="middle">纯 HTTP，不带凭据</text>
+  <rect class="bx-a" x="270" y="34" width="220" height="76" rx="12"/>
+  <text class="ttl on-a" x="380" y="60" text-anchor="middle">kubectl proxy</text>
+  <text class="mono sm" x="380" y="80" text-anchor="middle">127.0.0.1:9000</text>
+  <text class="sm" x="380" y="98" text-anchor="middle">读 kubeconfig，加上凭据和 TLS</text>
+  <rect class="bx-b" x="580" y="44" width="160" height="56" rx="10"/>
+  <text class="lbl on-b" x="660" y="78" text-anchor="middle">API 服务器</text>
+  <path class="ln" d="M182 72 H266" marker-end="url(#ar)"/>
+  <text class="sm" x="224" y="64" text-anchor="middle">http</text>
+  <path class="ln-b" d="M492 72 H576" marker-end="url(#ar-b)"/>
+  <text class="sm on-b" x="534" y="64" text-anchor="middle">https</text>
+</svg>
+<figcaption>图 14-4　kubectl proxy 帮你搞定认证</figcaption>
+</figure>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl proxy --port 9000 &amp;
+[1] 27533
+Starting to serve on 127.0.0.1:9000
+
+$ curl -X GET http://localhost:9000/api/v1/namespaces/shield/pods
+{
+  "kind": "PodList",
+  "apiVersion": "v1",
+  "metadata": {
+    "resourceVersion": "9524"
+  },
+  "items": []
+}
+
+$ curl -X GET http://localhost:9000/api/v1/namespaces
+{
+  "kind": "NamespaceList",
+  "apiVersion": "v1",
+  "items": [
+    {
+      "metadata": {
+        "name": "kube-system",
+...
+</pre>
+</div>
+
+<p>加上 <code>-v</code> 看收发的请求头。以 <code>&gt;</code> 开头的是 curl 发出的，以 <code>&lt;</code> 开头的是 API 服务器返回的：</p>
+
+<div class="code" data-lang="text">
+<pre>
+$ curl -v -X GET http://localhost:9000/api/v1/namespaces/shield/pods
+&gt; GET /api/v1/namespaces/shield/pods HTTP/1.1     # 对 Pod 的 REST 路径发 GET
+&gt; Accept: */*                                     # 接受任何序列化格式
+&lt; HTTP/1.1 200 OK                                 # 接受请求，开始响应
+&lt; Content-Type: application/json                  # 用 JSON 序列化响应
+&lt; X-Kubernetes-Pf-Flowschema-Uid: d50...          # Kubernetes 的优先级与公平性设置
+&lt; X-Kubernetes-Pf-Prioritylevel-Uid: 828...
+{                                                 # 响应体（序列化后的对象）
+  "kind": "PodList",
+  ...
+}
+</pre>
+</div>
+
+<h3>用 POST 创建、用 DELETE 删除</h3>
+
+<div class="code" data-lang="json" data-file="api/ns.json">
+<pre>
+{
+    "kind": "Namespace",
+    "apiVersion": "v1",
+    "metadata": {
+      "name": "shield",
+      "labels": {
+        "chapter": "api"
+      }
+    }
+}
+</pre>
+</div>
+
+<p>
+  如果用 <code>kubectl apply -f ns.json</code>，kubectl 会发出一个 HTTP <strong>POST</strong> 请求——这就是为什么人们常说把配置「POST 给 API 服务器」。
+  我们这次用 curl 亲手发（在 <code>api</code> 目录下执行，确保 proxy 还在运行；如果 shield 已存在请先删除）：
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ curl -X POST -H "Content-Type: application/json" \
+  --data-binary @ns.json http://localhost:9000/api/v1/namespaces
+{
+  "kind": "Namespace",
+  "apiVersion": "v1",
+  "metadata": {
+    "name": "shield",
+...
+
+$ kubectl get ns
+NAME              STATUS   AGE
+...
+shield            Active   14s
+
+$ curl -X DELETE \
+  -H "Content-Type: application/json" http://localhost:9000/api/v1/namespaces/shield
+{
+  ...
+  "status": {
+    "phase": "Terminating"
+  }
+}
+</pre>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th>curl 参数</th><th>作用</th></tr>
+  <tr><td><code>-X POST</code></td><td>强制使用 HTTP POST 方法</td></tr>
+  <tr><td><code>-H "Content-Type: application/json"</code></td><td>告诉 API 服务器请求体是序列化的 JSON</td></tr>
+  <tr><td><code>--data-binary @ns.json</code></td><td>指定清单文件作为请求体</td></tr>
+  <tr><td>URI</td><td>proxy 暴露的地址 + 资源的 REST 路径</td></tr>
+</table>
+</div>
+
+<p>Windows 用户需要把反斜杠换成反引号，并在 <code>@</code> 前加一个反引号。</p>
+
+<h2 id="api">API 的结构：API 组</h2>
+
+<p>
+  Kubernetes 刚诞生时 API 是单体的，所有资源都在一个全局命名空间里。随着项目壮大，API 被拆分成更小、更易管理的组，叫<strong>命名组（named groups）</strong>或<strong>子组（sub-groups）</strong>。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 270" role="img" aria-label="核心 API 组与命名 API 组">
+  <rect class="bx-a" x="20" y="14" width="200" height="242" rx="14"/>
+  <text class="ttl on-a" x="120" y="40" text-anchor="middle">核心组（core）</text>
+  <text class="mono sm" x="120" y="62" text-anchor="middle">/api/v1</text>
+  <rect class="bx" x="40" y="78" width="160" height="30" rx="6"/><text class="sm" x="120" y="98" text-anchor="middle">Pod</text>
+  <rect class="bx" x="40" y="114" width="160" height="30" rx="6"/><text class="sm" x="120" y="134" text-anchor="middle">Service</text>
+  <rect class="bx" x="40" y="150" width="160" height="30" rx="6"/><text class="sm" x="120" y="170" text-anchor="middle">Node · Namespace</text>
+  <rect class="bx" x="40" y="186" width="160" height="30" rx="6"/><text class="sm" x="120" y="206" text-anchor="middle">Secret · ServiceAccount</text>
+  <text class="sm" x="120" y="240" text-anchor="middle">早期资源，不再新增</text>
+
+  <rect class="bx-b" x="250" y="14" width="490" height="242" rx="14"/>
+  <text class="ttl on-b" x="495" y="40" text-anchor="middle">命名组（named groups）</text>
+  <text class="mono sm" x="495" y="62" text-anchor="middle">/apis/&lt;组名&gt;/&lt;版本&gt;</text>
+  <rect class="bx-g" x="270" y="78" width="140" height="102" rx="10"/>
+  <text class="ttl on-g" x="340" y="100" text-anchor="middle">apps</text>
+  <text class="sm" x="340" y="124" text-anchor="middle">Deployment</text>
+  <text class="sm" x="340" y="144" text-anchor="middle">StatefulSet</text>
+  <text class="sm" x="340" y="164" text-anchor="middle">DaemonSet</text>
+  <rect class="bx-p" x="425" y="78" width="140" height="102" rx="10"/>
+  <text class="ttl on-p" x="495" y="100" text-anchor="middle">networking.k8s.io</text>
+  <text class="sm" x="495" y="124" text-anchor="middle">Gateway</text>
+  <text class="sm" x="495" y="144" text-anchor="middle">GatewayClass</text>
+  <text class="sm" x="495" y="164" text-anchor="middle">NetworkPolicy</text>
+  <rect class="bx-g" x="580" y="78" width="140" height="102" rx="10"/>
+  <text class="ttl on-g" x="650" y="100" text-anchor="middle">storage.k8s.io</text>
+  <text class="sm" x="650" y="124" text-anchor="middle">StorageClass</text>
+  <text class="sm" x="650" y="144" text-anchor="middle">……</text>
+  <text class="sm" x="495" y="210" text-anchor="middle">所有新资源都加在这里；每组是一批相关资源</text>
+  <text class="sm" x="495" y="232" text-anchor="middle">还有 batch、autoscaling、rbac.authorization.k8s.io……</text>
+</svg>
+<figcaption>图 14-5　API 组的简化视图</figcaption>
+</figure>
+
+<h3>核心组</h3>
+
+<div class="tw">
+<table>
+  <tr><th>资源</th><th>REST 路径</th></tr>
+  <tr><td>Pods</td><td><code>/api/v1/namespaces/{namespace}/pods/</code></td></tr>
+  <tr><td>Services</td><td><code>/api/v1/namespaces/{namespace}/services/</code></td></tr>
+  <tr><td>Nodes</td><td><code>/api/v1/nodes/</code></td></tr>
+  <tr><td>Namespaces</td><td><code>/api/v1/namespaces/</code></td></tr>
+</table>
+</div>
+
+<p>命名空间级的对象路径更长，要多带 <code>…/namespaces/{namespace}/</code> 两段；Node 这类集群级对象路径就短得多。读请求的预期响应是 <code>200 OK</code> 或 <code>401 Unauthorized</code>。</p>
+
+<h3>命名组</h3>
+
+<div class="tw">
+<table>
+  <tr><th>资源</th><th>REST 路径</th></tr>
+  <tr><td>Gateway</td><td><code>/apis/networking.k8s.io/v1/namespaces/{namespace}/gateways/</code></td></tr>
+  <tr><td>ClusterRole</td><td><code>/apis/rbac.authorization.k8s.io/v1/clusterroles/</code></td></tr>
+  <tr><td>StorageClass</td><td><code>/apis/storage.k8s.io/v1/storageclasses/</code></td></tr>
+</table>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 130" role="img" aria-label="REST 路径的 GVR 结构">
+  <text class="mono ttl" x="380" y="44" text-anchor="middle" style="font-size:20px">/apis/<tspan class="on-b">storage.k8s.io</tspan>/<tspan class="on-a">v1</tspan>/<tspan class="on-g">storageclasses</tspan></text>
+  <text class="ttl on-b" x="300" y="88" text-anchor="middle">G：Group（组）</text>
+  <text class="ttl on-a" x="430" y="88" text-anchor="middle">V：Version</text>
+  <text class="ttl on-g" x="560" y="88" text-anchor="middle">R：Resource</text>
+  <path class="ln-b" d="M300 52 V72"/><path class="ln-a" d="M432 52 V72"/><path class="ln-g" d="M540 52 L556 72"/>
+  <text class="sm" x="380" y="118" text-anchor="middle">核心组以 /api（单数）开头且不写组名；命名组以 /apis（复数）开头并带组名</text>
+</svg>
+<figcaption>图 14-6　GVR：Group、Version、Resource</figcaption>
+</figure>
+
+<div class="box deep">
+  <div class="t">&#128302; 历史遗留</div>
+  <p>
+    Pod 和 Service 都在核心组，这是因为它们诞生于命名组出现之前。如果今天才发明它们，Service 大概会放进 <code>networking.k8s.io</code>，Pod 会放进 <code>apps</code>。
+    有些地方会用空的双引号 <code>""</code> 表示核心组——因为当初设计 API 时根本没考虑过分组，一切都「就在 API 里」。
+  </p>
+</div>
+
+<h3>查看 API</h3>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl api-resources
+NAME                       SHORTNAMES   APIVERSION             NAMESPACED   KIND
+namespaces                 ns           v1                     false        Namespace
+nodes                      no           v1                     false        Node
+pods                       po           v1                     true         Pod
+deployments                deploy       apps/v1                true         Deployment
+replicasets                rs           apps/v1                true         ReplicaSet
+statefulsets               sts          apps/v1                true         StatefulSet
+cronjobs                   cj           batch/v1               true         CronJob
+jobs                                    batch/v1               true         Job
+horizontalpodautoscalers   hpa          autoscaling/v2         true         HorizontalPodAutoscaler
+networkpolicies            netpol       networking.k8s.io/v1   true         NetworkPolicy
+storageclasses             sc           storage.k8s.io/v1      false        StorageClass
+
+$ kubectl api-versions          # 集群支持哪些 API 版本（能看出是否启用了 alpha API）
+admissionregistration.k8s.io/v1
+apiextensions.k8s.io/v1
+apps/v1
+autoscaling/v1
+autoscaling/v2
+v1
+
+$ curl http://localhost:9000/api          # 核心组只有 v1
+{
+  "kind": "APIVersions",
+  "versions": [
+    "v1"
+  ],
+...
+
+$ curl http://localhost:9000/apis         # 所有命名组
+{
+  "kind": "APIGroupList",
+  "groups": [
+    {
+      "name": "apps",
+      "versions": [ { "groupVersion": "apps/v1", "version": "v1" } ],
+      "preferredVersion": { "groupVersion": "apps/v1", "version": "v1" }
+    },
+...
+</pre>
+</div>
+
+<p>同样的 URI 也可以直接放进浏览器或 Postman 里试试。</p>
+
+<h2 id="maturity">alpha、beta 与 GA</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="API 资源从 alpha 到 beta 到 GA 的演进">
+  <rect class="bx-r" x="20" y="30" width="220" height="130" rx="12"/>
+  <text class="ttl on-r" x="130" y="56" text-anchor="middle">Alpha · 实验性</text>
+  <text class="mono sm" x="130" y="82" text-anchor="middle">/apis/apps/v1alpha1/tkb</text>
+  <text class="mono sm" x="130" y="100" text-anchor="middle">/apis/apps/v1alpha2/tkb</text>
+  <text class="sm" x="130" y="126" text-anchor="middle">可能有 bug、随时删功能</text>
+  <text class="sm" x="130" y="144" text-anchor="middle">大多数集群默认关闭</text>
+
+  <rect class="bx-a" x="270" y="30" width="220" height="130" rx="12"/>
+  <text class="ttl on-a" x="380" y="56" text-anchor="middle">Beta · 预发布</text>
+  <text class="mono sm" x="380" y="82" text-anchor="middle">/apis/apps/v1beta1/tkb</text>
+  <text class="mono sm" x="380" y="100" text-anchor="middle">/apis/apps/v1beta2/tkb</text>
+  <text class="sm" x="380" y="126" text-anchor="middle">接近最终形态，可能小改</text>
+  <text class="sm" x="380" y="144" text-anchor="middle">大多数集群默认开启</text>
+
+  <rect class="bx-g" x="520" y="30" width="220" height="130" rx="12"/>
+  <text class="ttl on-g" x="630" y="56" text-anchor="middle">GA · 稳定</text>
+  <text class="mono sm" x="630" y="82" text-anchor="middle">/apis/apps/v1/tkb</text>
+  <text class="sm" x="630" y="108" text-anchor="middle">可用于生产</text>
+  <text class="sm" x="630" y="126" text-anchor="middle">长期承诺支持</text>
+  <text class="sm" x="630" y="144" text-anchor="middle">演进到 v2 时再走一遍流程</text>
+
+  <path class="ln" d="M242 95 H266" marker-end="url(#ar)"/>
+  <path class="ln" d="M492 95 H516" marker-end="url(#ar)"/>
+
+  <rect class="bx-d" x="20" y="182" width="720" height="54" rx="10"/>
+  <text class="sm" x="380" y="204" text-anchor="middle">可以通过一个 API 版本部署对象，再通过更新的版本读取和管理它</text>
+  <text class="sm" x="380" y="222" text-anchor="middle">例如用 v1beta2 部署，之后用稳定的 v1 更新和管理</text>
+</svg>
+<figcaption>图 14-7　新资源的成长之路</figcaption>
+</figure>
+
+<p>真实世界中稳定资源的路径示例：<code>/apis/networking.k8s.io/v1/gateways</code>、<code>/apis/batch/v1/cronjobs</code>、<code>/apis/autoscaling/v2/horizontalpodautoscalers</code>。</p>
+
+<h3>资源弃用</h3>
+
+<div class="cards">
+  <div class="card"><span class="ic">&#9203;</span><h4>Beta：9 个月</h4><p>beta 资源有 9 个月窗口期，要么发布新的 beta 版本，要么升级为 GA，防止停滞。（Ingress 曾在 beta 里待了超过 15 个版本！）</p></div>
+  <div class="card"><span class="ic">&#128737;</span><h4>GA：12 个月或 3 个版本</h4><p>GA 资源被弃用后仍会继续提供支持 12 个月或 3 个版本（取较长者），然后才移除。而且只有在新的稳定版（如 v2）发布后，才会弃用旧的 v1。</p></div>
+</div>
+
+<p>近期版本在你使用已弃用资源时会做三件事：</p>
+<ol>
+  <li>在命令行返回弃用警告；</li>
+  <li>在该请求的审计记录上加 <code>k8s.io/deprecated:true</code> 注解；</li>
+  <li>设置 <code>apiserver_requested_deprecated_apis</code> 指标。</li>
+</ol>
+<p>后两项可以帮你查询审计日志和指标，在升级 Kubernetes 之前弄清自己是否在用即将移除的 API。</p>
+
+<h2 id="crd">扩展 API：CRD</h2>
+
+<p>
+  Kubernetes 自带一组内置控制器来部署和管理内置资源，但你也可以加入<strong>自己的资源和控制器</strong>。网络和存储厂商常用这种方式通过 Kubernetes API 暴露高级功能，
+  比如快照计划、IP 地址管理：卷通过 CSI 驱动呈现，Pod 通过 StorageClass 和 PVC 使用它们，而快照计划这类高级功能则通过自定义资源和控制器管理。
+  这样大家都能用熟悉的 kubectl 和 YAML 管理一切。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="用 CRD 和自定义控制器扩展 Kubernetes API">
+  <rect class="bx-p" x="20" y="20" width="220" height="90" rx="12"/>
+  <text class="ttl on-p" x="130" y="46" text-anchor="middle">① CRD</text>
+  <text class="mono sm" x="130" y="70" text-anchor="middle">books.nigelpoulton.com</text>
+  <text class="sm" x="130" y="92" text-anchor="middle">定义新的资源类型</text>
+
+  <rect class="bx-b" x="300" y="20" width="200" height="90" rx="12"/>
+  <text class="ttl on-b" x="400" y="46" text-anchor="middle">API 服务器</text>
+  <text class="sm" x="400" y="70" text-anchor="middle">新增 REST 路径</text>
+  <text class="mono sm" x="400" y="92" text-anchor="middle" style="font-size:10px">/apis/nigelpoulton.com/v1/books</text>
+
+  <rect class="bx-g" x="560" y="20" width="180" height="90" rx="12"/>
+  <text class="ttl on-g" x="650" y="46" text-anchor="middle">② Book 对象</text>
+  <text class="mono sm" x="650" y="70" text-anchor="middle">kind: Book</text>
+  <text class="mono sm" x="650" y="92" text-anchor="middle">name: ai</text>
+
+  <rect class="bx-d" x="300" y="146" width="200" height="74" rx="12"/>
+  <text class="ttl" x="400" y="172" text-anchor="middle">③ 自定义控制器</text>
+  <text class="sm" x="400" y="194" text-anchor="middle">watch Book 对象并做事</text>
+  <text class="sm" x="400" y="210" text-anchor="middle">（本章不涉及）</text>
+
+  <path class="ln" d="M242 65 H296" marker-end="url(#ar)"/>
+  <path class="ln" d="M502 65 H556" marker-end="url(#ar)"/>
+  <path class="ln-d" d="M400 144 V112"/>
+  <text class="sm" x="130" y="160">kubectl get bk</text>
+  <text class="sm" x="130" y="180">kubectl explain book</text>
+  <text class="sm" x="130" y="200">用起来和原生资源一模一样</text>
+  <text class="sm" x="650" y="160" text-anchor="middle">没有控制器的话，</text>
+  <text class="sm" x="650" y="180" text-anchor="middle">自定义资源只是被</text>
+  <text class="sm" x="650" y="200" text-anchor="middle">存起来，什么也不做</text>
+</svg>
+<figcaption>图 14-8　扩展 API = 自定义资源 + 自定义控制器</figcaption>
+</figure>
+
+<div class="code" data-lang="yaml" data-file="api/crd.yml">
+<pre>
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: books.nigelpoulton.com
+spec:
+  group: nigelpoulton.com        # API 子组（即命名 API 组）
+  scope: Cluster                 # 可以是 Namespaced 或 Cluster
+  names:
+    plural: books                # 所有资源都需要复数名和单数名
+    singular: book               # 单数名用于命令行和输出
+    kind: Book                   # YAML 里的 kind 字段
+    shortNames:
+    - bk                         # kubectl 可用的简称
+  versions:                      # 资源可以由多个 API 版本提供
+    - name: v1
+      served: true               # 设为 false 则不提供 v1
+      storage: true              # 以这个版本存储对象实例
+      schema:
+        openAPIV3Schema:         # 定义资源的属性
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                bookTitle:
+                  type: string
+                subTitle:
+                  type: string
+                topic:
+                  type: string
+                edition:
+                  type: integer
+                salesUrl:
+                  type: string
+      additionalPrinterColumns:  # kubectl get 时额外显示的列
+      - name: Title
+        type: string
+        jsonPath: .spec.bookTitle
+      - name: Subtitle
+        type: string
+        jsonPath: .spec.subTitle
+      - name: Edition
+        type: integer
+        jsonPath: .spec.edition
+      - name: URL
+        type: string
+        jsonPath: .spec.salesUrl
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ cd api
+$ kubectl apply -f crd.yml
+customresourcedefinition.apiextensions.k8s.io/books.nigelpoulton.com created
+
+$ kubectl api-resources | grep books
+books      bk      nigelpoulton.com/v1      false      Book
+
+$ kubectl explain book
+GROUP:      nigelpoulton.com
+KIND:       Book
+VERSION:    v1
+</pre>
+</div>
+
+<p>现在创建一个 Book 对象，注意 <code>spec</code> 里的字段名和类型必须与 CRD 中定义的一致：</p>
+
+<div class="code" data-lang="yaml" data-file="api/book.yml">
+<pre>
+apiVersion: nigelpoulton.com/v1
+kind: Book
+metadata:
+  name: ai
+spec:
+  bookTitle: "AI Explained"
+  subTitle: "Facts, Fiction, and Future"
+  topic: "Artificial Intelligence"
+  edition: 1
+  salesUrl: "https://www.amazon.com/dp/1916585388"
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f book.yml
+book.nigelpoulton.com/ai created
+
+$ kubectl get bk
+NAME   TITLE          SUBTITLE                     EDITION   URL
+ai     AI Explained   Facts, Fiction, and Future   1         https://www.amazon.com/dp/1916585388
+
+$ curl http://localhost:9000/apis/nigelpoulton.com/v1/
+{
+  "kind": "APIResourceList",
+  "groupVersion": "nigelpoulton.com/v1",
+  "resources": [
+    {
+      "name": "books",
+      "singularName": "book",
+      "namespaced": false,
+      "kind": "Book",
+      "verbs": ["delete", "deletecollection", "get", "list", "patch", "create", "update", "watch"],
+      "shortNames": ["bk"]
+    }
+  ]
+}
+</pre>
+</div>
+
+<h2 id="cleanup">清理</h2>
+
+<div class="code" data-lang="bash">
+<pre>
+$ ps | grep kubectl              # 找到 kubectl proxy 的 PID（Windows：tasklist | Select-String -Pattern 'kubectl'）
+$ kill -9 27533                  # 用你自己的 PID（Windows：taskkill /F /PID &lt;PID&gt;）
+$ kubectl delete book ai
+$ kubectl delete crd books.nigelpoulton.com
+</pre>
+</div>
+
+<h2 id="summary">小结</h2>
+<ul>
+  <li>Kubernetes 是 API 驱动的平台，API 通过 API 服务器对内对外暴露；控制平面必须高可用、高性能。</li>
+  <li>API 是基于资源的 RESTful API，通过 POST、GET、PUT、PATCH、DELETE 等 HTTP 方法接受 CRUD 操作；对外通常用 JSON，对内常用 Protobuf。</li>
+  <li>API 分组：早期资源在核心组（<code>/api/v1</code>），新资源都在命名组（如 <code>/apis/networking.k8s.io/v1/</code>）。</li>
+  <li>新资源经历 alpha → beta → GA，GA 资源有长期支持承诺和明确的弃用策略。</li>
+  <li>CRD 让你添加看起来、用起来都像原生资源的自定义资源；配合自定义控制器才能真正「做事」。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>运行 <code>kubectl get pods -v=8</code>，在详细输出里找到 kubectl 发出的 REST 请求路径和 <code>Accept</code> 头。</li>
+    <li>通过 <code>kubectl proxy</code>，用 curl 访问 <code>/apis/apps/v1/namespaces/kube-system/deployments</code>，从 JSON 中找出 coredns 的副本数。</li>
+    <li>修改 <code>book.yml</code>，把 <code>edition</code> 改成字符串 <code>"first"</code> 再 apply，看看 API 服务器如何依据 CRD 中的 schema 拒绝它。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

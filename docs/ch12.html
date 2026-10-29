@@ -1,0 +1,671 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 12 章 · StatefulSet — Kubernetes 入门实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="12">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 12 章</span>
+<h1>StatefulSet：给有状态应用稳定的身份</h1>
+<p class="lede">
+  本章所说的<strong>有状态应用</strong>，是指会创建并保存有价值数据的应用：数据库、键值存储、需要记住客户端会话的应用……
+  它们需要的不是「一群可互换的副本」，而是「每个副本都有固定的名字和自己的数据」。这正是 StatefulSet 的用武之地。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>说出 StatefulSet 相比 Deployment 多出的三项能力</li>
+    <li>理解 Pod 命名规则、有序创建/删除，以及 Pod 与卷的绑定</li>
+    <li>理解 <strong>headless Service</strong> 与 governing Service，以及每个 Pod 的 DNS 名</li>
+    <li>动手部署 StatefulSet，并验证对等发现、扩缩、Pod 故障和节点故障的行为</li>
+    <li>知道删除 StatefulSet 前要先缩容到 0</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="theory">StatefulSet 与 Deployment</h2>
+
+<p>
+  二者有很多共同点：都是 Kubernetes API 资源，都遵循标准的控制器架构（调和观测状态与期望状态的控制循环），都管理 Pod，都提供自愈、扩缩、滚动更新。
+  但 StatefulSet 多了三项 Deployment 没有的能力：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 270" role="img" aria-label="Deployment 与 StatefulSet 的 Pod 对比">
+  <rect class="bx-b" x="20" y="14" width="300" height="242" rx="14"/>
+  <text class="ttl on-b" x="170" y="40" text-anchor="middle">Deployment：可互换的「牛群」</text>
+  <rect class="bx" x="40" y="58" width="80" height="54" rx="8"/><text class="mono sm" x="80" y="82" text-anchor="middle">web-7f9c…</text><text class="mono sm" x="80" y="100" text-anchor="middle">-x2k1</text>
+  <rect class="bx" x="130" y="58" width="80" height="54" rx="8"/><text class="mono sm" x="170" y="82" text-anchor="middle">web-7f9c…</text><text class="mono sm" x="170" y="100" text-anchor="middle">-q8zt</text>
+  <rect class="bx" x="220" y="58" width="80" height="54" rx="8"/><text class="mono sm" x="260" y="82" text-anchor="middle">web-7f9c…</text><text class="mono sm" x="260" y="100" text-anchor="middle">-m3vb</text>
+  <text class="sm" x="40" y="140">· 随机名字，替换后名字会变</text>
+  <text class="sm" x="40" y="162">· 所有 Pod 同时启动（可能有竞争）</text>
+  <text class="sm" x="40" y="184">· 通常共享或不用持久卷</text>
+  <text class="sm" x="40" y="206">· 通过 Service 负载均衡访问</text>
+  <text class="sm on-b" x="170" y="240" text-anchor="middle">适合：无状态 Web、API</text>
+
+  <rect class="bx-a" x="340" y="14" width="400" height="242" rx="14"/>
+  <text class="ttl on-a" x="540" y="40" text-anchor="middle">StatefulSet：各有名字的「宠物」</text>
+  <rect class="bx" x="360" y="58" width="110" height="54" rx="8"/><text class="mono sm" x="415" y="82" text-anchor="middle">tkb-sts-0</text><text class="sm" x="415" y="100" text-anchor="middle">卷 0</text>
+  <rect class="bx" x="485" y="58" width="110" height="54" rx="8"/><text class="mono sm" x="540" y="82" text-anchor="middle">tkb-sts-1</text><text class="sm" x="540" y="100" text-anchor="middle">卷 1</text>
+  <rect class="bx" x="610" y="58" width="110" height="54" rx="8"/><text class="mono sm" x="665" y="82" text-anchor="middle">tkb-sts-2</text><text class="sm" x="665" y="100" text-anchor="middle">卷 2</text>
+  <text class="sm" x="360" y="140">① 可预测、持久的 Pod 名和 DNS 名</text>
+  <text class="sm" x="360" y="162">② 可预测、持久的卷绑定</text>
+  <text class="sm" x="360" y="184">③ 可预测的启动和关闭顺序</text>
+  <text class="sm" x="360" y="206">①② 合称 Pod 的「粘性 ID（sticky ID）」</text>
+  <text class="sm on-a" x="540" y="240" text-anchor="middle">适合：数据库、键值存储、集群化应用</text>
+</svg>
+<figcaption>图 12-1　StatefulSet 的 Pod 有固定身份，失败、扩缩、重新调度后都保持不变</figcaption>
+</figure>
+
+<p>
+  例如，StatefulSet 的某个 Pod 失败后，替代它的新 Pod 会有<strong>相同的 Pod 名、相同的 DNS 主机名，并连接相同的卷</strong>——即使新 Pod 被调度到另一个节点上。
+  被缩容删掉、后来又扩容回来的 Pod 也一样。下面是一个最简单的 StatefulSet：
+</p>
+
+<div class="code" data-lang="yaml">
+<pre>
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: tkb-sts
+spec:
+  selector:
+    matchLabels:
+      app: mongo
+  serviceName: "tkb-sts"
+  replicas: 3
+  template:
+    metadata:
+      labels:
+        app: mongo
+    spec:
+      containers:
+      - name: ctr-mongo
+        image: mongo:latest
+      ...
+</pre>
+</div>
+
+<h3>Pod 命名</h3>
+<p>
+  格式是 <code>&lt;StatefulSet 名&gt;-&lt;整数&gt;</code>，整数是从 0 开始的<strong>序号（index ordinal）</strong>。上例会得到 <code>tkb-sts-0</code>、<code>tkb-sts-1</code>、<code>tkb-sts-2</code>。
+  Pod 名是 StatefulSet 启动、自愈、扩缩、删除 Pod 以及连接卷的核心。StatefulSet 名还会用来构造每个副本的 DNS 名，所以别用奇怪的字符。
+</p>
+
+<h3>有序创建与删除</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="StatefulSet 逐个创建 Pod，缩容时从最高序号逆序删除">
+  <text class="ttl" x="20" y="24">创建 / 扩容：一次一个，前一个 Running 且 Ready 才启动下一个</text>
+  <path class="ln" d="M20 92 H740" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="40" y="40" width="150" height="40" rx="8"/><text class="mono sm" x="115" y="65" text-anchor="middle">tkb-sts-0 ✓</text>
+  <rect class="bx-g" x="230" y="40" width="150" height="40" rx="8"/><text class="mono sm" x="305" y="65" text-anchor="middle">tkb-sts-1 ✓</text>
+  <rect class="bx-g" x="420" y="40" width="150" height="40" rx="8"/><text class="mono sm" x="495" y="65" text-anchor="middle">tkb-sts-2 ✓</text>
+  <path class="ln-g" d="M192 60 H226" marker-end="url(#ar-g)"/><path class="ln-g" d="M382 60 H416" marker-end="url(#ar-g)"/>
+  <text class="sm" x="660" y="64" text-anchor="middle">扩到 5 → 先 3 再 4</text>
+
+  <text class="ttl" x="20" y="140">缩容：从最高序号开始，等它完全终止，再删下一个</text>
+  <path class="ln" d="M740 208 H20" marker-end="url(#ar)"/>
+  <rect class="bx-r" x="420" y="156" width="150" height="40" rx="8"/><text class="mono sm" x="495" y="181" text-anchor="middle">tkb-sts-2 ✗ 先删</text>
+  <rect class="bx-r" x="230" y="156" width="150" height="40" rx="8"/><text class="mono sm" x="305" y="181" text-anchor="middle">tkb-sts-1 ✗ 再删</text>
+  <rect class="bx" x="40" y="156" width="150" height="40" rx="8"/><text class="mono sm" x="115" y="181" text-anchor="middle">tkb-sts-0</text>
+  <path class="ln-r" d="M418 176 H384" marker-end="url(#ar-r)"/>
+  <text class="sm" x="660" y="180" text-anchor="middle">绝不并行终止</text>
+</svg>
+<figcaption>图 12-2　顺序是有状态应用的生命线：集群化应用若多个副本同时终止可能丢数据</figcaption>
+</figure>
+
+<p>
+  这和 Deployment 很不同：Deployment 通过 ReplicaSet 控制器<strong>同时</strong>启动所有 Pod，可能产生竞争条件。
+  另外，StatefulSet 控制器<strong>自己</strong>完成自愈和扩缩，架构上也不同于 Deployment（后者依赖 ReplicaSet 控制器）。
+</p>
+
+<h3>删除 StatefulSet 的两点注意</h3>
+<ol>
+  <li>删除 StatefulSet 对象<strong>不会</strong>有序地终止它的 Pod。所以删除前<strong>先缩容到 0</strong>！</li>
+  <li>可以用 <code>terminationGracePeriodSeconds</code> 进一步控制 Pod 终止，常见做法是至少设 10 秒，让应用有时间刷新缓冲区、安全提交还在进行中的写入。</li>
+</ol>
+
+<h3>StatefulSet 与卷</h3>
+
+<p>
+  卷是 StatefulSet Pod 粘性 ID 的重要组成部分。StatefulSet 控制器创建 Pod 时，也会创建它们需要的卷，并给卷起特殊的名字，把它们和正确的 Pod 关联起来：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="StatefulSet 的每个 Pod 通过名字关联到各自的 PVC">
+  <rect class="bx-a" x="270" y="14" width="220" height="44" rx="10"/>
+  <text class="ttl on-a" x="380" y="41" text-anchor="middle">StatefulSet tkb-sts</text>
+  <g>
+    <rect class="bx-b" x="40" y="86" width="180" height="46" rx="8"/><text class="mono sm on-b" x="130" y="114" text-anchor="middle">Pod tkb-sts-0</text>
+    <rect class="bx-g" x="40" y="164" width="180" height="46" rx="8"/><text class="mono sm on-g" x="130" y="186" text-anchor="middle">PVC</text><text class="mono sm" x="130" y="202" text-anchor="middle">webroot-tkb-sts-0</text>
+    <path class="ln" d="M130 134 V160" marker-start="url(#ar)" marker-end="url(#ar)"/>
+  </g>
+  <g>
+    <rect class="bx-b" x="290" y="86" width="180" height="46" rx="8"/><text class="mono sm on-b" x="380" y="114" text-anchor="middle">Pod tkb-sts-1</text>
+    <rect class="bx-g" x="290" y="164" width="180" height="46" rx="8"/><text class="mono sm on-g" x="380" y="186" text-anchor="middle">PVC</text><text class="mono sm" x="380" y="202" text-anchor="middle">webroot-tkb-sts-1</text>
+    <path class="ln" d="M380 134 V160" marker-start="url(#ar)" marker-end="url(#ar)"/>
+  </g>
+  <g>
+    <rect class="bx-b" x="540" y="86" width="180" height="46" rx="8"/><text class="mono sm on-b" x="630" y="114" text-anchor="middle">Pod tkb-sts-2</text>
+    <rect class="bx-g" x="540" y="164" width="180" height="46" rx="8"/><text class="mono sm on-g" x="630" y="186" text-anchor="middle">PVC</text><text class="mono sm" x="630" y="202" text-anchor="middle">webroot-tkb-sts-2</text>
+    <path class="ln" d="M630 134 V160" marker-start="url(#ar)" marker-end="url(#ar)"/>
+  </g>
+  <path class="ln" d="M330 60 L160 84"/><path class="ln" d="M380 60 V84"/><path class="ln" d="M430 60 L600 84"/>
+</svg>
+<figcaption>图 12-3　PVC 名 = 卷声明模板名 + Pod 名</figcaption>
+</figure>
+
+<p>
+  虽然卷和特定副本关联，但它们仍通过常规的 PVC 机制与 Pod <strong>解耦</strong>，拥有独立的生命周期：Pod 失败或被终止时，卷不受影响，
+  替代 Pod 可以重新连上幸存的卷和数据，即使它被调度到别的节点。缩容同理：被删的 Pod 的卷还在，之后扩容时新 Pod 会接回原来的卷。
+  如果你不小心删了一个 StatefulSet Pod（尤其是最后一个副本），这个行为能救命！
+</p>
+
+<h3>故障处理</h3>
+<p>
+  最简单的是 Pod 故障：5 个副本的 <code>tkb-sts</code> 中 <code>tkb-sts-3</code> 挂了，控制器启动一个同名新 Pod 并连上幸存的卷。
+  节点故障更复杂，一些老版本需要人工干预——因为 Kubernetes 很难判断节点是真的挂了还是只是暂时重启。
+  如果它替换了 Pod 后「故障」节点又恢复了，就会有两个一模一样的 Pod 写同一个卷，导致数据损坏。新版本在这方面已经好很多。
+</p>
+
+<h2 id="headless">网络身份与 headless Service</h2>
+
+<p>
+  有些外部应用需要反复连接<strong>同一个</strong> Pod。普通 Service 会在一组 Pod 之间负载均衡，这不合适。
+  StatefulSet 使用一种特殊的 Service——<strong>headless Service（无头服务）</strong>，它为每个 StatefulSet Pod 创建可预测的 DNS 名，
+  应用可以查询 DNS（服务注册表）拿到完整的 Pod 列表，然后直接连接特定的 Pod。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 280" role="img" aria-label="普通 Service 与 headless Service 对比">
+  <rect class="bx-b" x="20" y="14" width="340" height="252" rx="14"/>
+  <text class="ttl on-b" x="190" y="40" text-anchor="middle">普通 Service：有头有尾</text>
+  <rect class="bx-a" x="110" y="58" width="160" height="50" rx="10"/>
+  <text class="lbl on-a" x="190" y="80" text-anchor="middle">头：ClusterIP</text>
+  <text class="mono sm" x="190" y="98" text-anchor="middle">10.96.4.20</text>
+  <rect class="bx" x="40" y="156" width="90" height="40" rx="8"/><text class="sm" x="85" y="181" text-anchor="middle">Pod</text>
+  <rect class="bx" x="145" y="156" width="90" height="40" rx="8"/><text class="sm" x="190" y="181" text-anchor="middle">Pod</text>
+  <rect class="bx" x="250" y="156" width="90" height="40" rx="8"/><text class="sm" x="295" y="181" text-anchor="middle">Pod</text>
+  <path class="ln" d="M160 110 L90 152" marker-end="url(#ar)"/><path class="ln" d="M190 110 V152" marker-end="url(#ar)"/><path class="ln" d="M220 110 L290 152" marker-end="url(#ar)"/>
+  <text class="sm" x="190" y="136" text-anchor="middle">尾：负载均衡</text>
+  <text class="sm" x="190" y="228" text-anchor="middle">DNS：名字 → 一个 ClusterIP</text>
+  <text class="sm" x="190" y="248" text-anchor="middle">客户端不知道连到了哪个 Pod</text>
+
+  <rect class="bx-a" x="400" y="14" width="340" height="252" rx="14"/>
+  <text class="ttl on-a" x="570" y="40" text-anchor="middle">headless Service：只有尾</text>
+  <rect class="bx-d" x="490" y="58" width="160" height="50" rx="10"/>
+  <text class="lbl" x="570" y="80" text-anchor="middle">clusterIP: None</text>
+  <text class="sm" x="570" y="98" text-anchor="middle">（没有头）</text>
+  <rect class="bx-g" x="420" y="156" width="96" height="40" rx="8"/><text class="mono sm" x="468" y="181" text-anchor="middle">tkb-sts-0</text>
+  <rect class="bx-g" x="522" y="156" width="96" height="40" rx="8"/><text class="mono sm" x="570" y="181" text-anchor="middle">tkb-sts-1</text>
+  <rect class="bx-g" x="624" y="156" width="96" height="40" rx="8"/><text class="mono sm" x="672" y="181" text-anchor="middle">tkb-sts-2</text>
+  <path class="ln-d" d="M540 110 L475 152"/><path class="ln-d" d="M570 110 V152"/><path class="ln-d" d="M600 110 L665 152"/>
+  <text class="sm" x="570" y="136" text-anchor="middle">为每个 Pod 注册 DNS 记录</text>
+  <text class="sm" x="570" y="228" text-anchor="middle">DNS：每个 Pod 一条 A 记录 + SRV 记录</text>
+  <text class="sm" x="570" y="248" text-anchor="middle">客户端可以点名连接某个 Pod</text>
+</svg>
+<figcaption>图 12-4　headless Service 的主要用途：为 StatefulSet Pod 创建 DNS 记录</figcaption>
+</figure>
+
+<div class="code" data-lang="yaml">
+<pre>
+apiVersion: v1
+kind: Service              # Service
+metadata:
+  name: mongo-prod
+spec:
+  clusterIP: None          # 让它成为 headless Service
+  selector:
+    app: mongo
+    env: prod
+---
+apiVersion: apps/v1
+kind: StatefulSet          # StatefulSet
+metadata:
+  name: sts-mongo
+spec:
+  serviceName: mongo-prod  # governing Service（主管服务）
+</pre>
+</div>
+
+<ul>
+  <li><strong>headless Service</strong>：一个没有 ClusterIP（<code>spec.clusterIP: None</code>）的普通 Service 对象；</li>
+  <li><strong>governing Service</strong>：在 StatefulSet 的 <code>spec.serviceName</code> 里引用它，它就负责这个 StatefulSet 的 DNS 子域。</li>
+</ul>
+<p>二者结合后，Service 会为每个匹配标签选择器的 Pod 创建 DNS SRV 和 A 记录。注意：开发者需要让应用主动去查询 DNS 才能用上这些记录。</p>
+
+<h2 id="deploy">动手：部署 StatefulSet</h2>
+
+<p>示例在 LKE 和本地 Docker Desktop 多节点集群上测试过。命令都在 <code>statefulsets</code> 目录执行。你将依次部署：① StorageClass ② headless Service ③ StatefulSet（也可以用 <code>app.yml</code> 一次部署全部）。</p>
+
+<h3>1. StorageClass</h3>
+
+<div class="code" data-lang="yaml" data-file="statefulsets/lke-sc.yml">
+<pre>
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: block                              # PVC 会引用这个名字
+provisioner: linodebs.csi.linode.com       # LKE 块存储 CSI 插件
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Delete
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 不是 LKE？</div>
+  <p>
+    Docker Desktop 多节点（kind）集群请改用 <code>dd-kind-sc.yml</code>，它使用 <code>rancher.io/local-path</code> 供应器，创建的 SC 名叫 <code>flash</code>，
+    所以还要把 <code>sts.yml</code> 里的 <code>storageClassName</code> 从 <code>block</code> 改成 <code>flash</code>。
+    其他云：要么自己为你的云创建一个名叫 <code>block</code> 的 SC，要么改用集群已有的 SC 并修改 <code>storageClassName</code>。
+  </p>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f lke-sc.yml
+storageclass.storage.k8s.io/block created
+
+$ kubectl get sc
+NAME    PROVISIONER               RECLAIMPOLICY   VOLUMEBINDINGMODE      ALLOWVOLUMEEXPANSION
+block   linodebs.csi.linode.com   Delete          WaitForFirstConsumer   true
+</pre>
+</div>
+
+<h3>2. governing headless Service</h3>
+
+<div class="code" data-lang="yaml" data-file="statefulsets/headless-svc.yml">
+<pre>
+# 为 StatefulSet Pod 提供 DNS 名的 headless Service
+apiVersion: v1
+kind: Service              # 普通的 Kubernetes Service
+metadata:
+  name: dullahan           # 名字里只用合法的 DNS 字符
+  labels:
+    app: web
+spec:
+  ports:
+  - port: 80
+    name: web
+  clusterIP: None          # 让它成为 headless Service
+  selector:
+    app: web
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f headless-svc.yml
+service/dullahan created
+
+$ kubectl get svc
+NAME       TYPE        CLUSTER-IP   EXTERNAL-IP   PORT(S)   AGE
+dullahan   ClusterIP   None         &lt;none&gt;        80/TCP    31s
+</pre>
+</div>
+
+<h3>3. StatefulSet</h3>
+
+<div class="code" data-lang="yaml" data-file="statefulsets/sts.yml">
+<pre>
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: tkb-sts                    # 所有副本和卷的名字都以它为基础
+spec:
+  replicas: 3                      # 部署 3 个副本
+  selector:
+    matchLabels:
+      app: web
+  serviceName: "dullahan"          # 指定 governing Service
+  template:
+    metadata:
+      labels:
+        app: web
+    spec:
+      terminationGracePeriodSeconds: 10
+      containers:
+      - name: ctr-web
+        image: nginx:latest
+        ports:
+        - containerPort: 80
+          name: web
+        volumeMounts:              # ┐ 挂载这个卷
+        - name: webroot            # │
+          mountPath: /usr/share/nginx/html   # ┘
+  volumeClaimTemplates:            # ┐ 为每个 Pod 动态创建一个卷
+  - metadata:                      # │
+      name: webroot                # │
+    spec:                          # │
+      accessModes: [ "ReadWriteOnce" ]       # │
+      storageClassName: "block"    # │ 通过 block 这个 StorageClass
+      resources:                   # │
+        requests:                  # │
+          storage: 1Gi             # ┘ 仓库里是 1Gi（书中示例为 10Gi）
+</pre>
+</div>
+
+<div class="cards">
+  <div class="card"><span class="ic">&#127991;</span><h4>replicas: 3</h4><p>按顺序创建 <code>tkb-sts-0/1/2</code>，每个 Running 且 Ready 后才启动下一个。</p></div>
+  <div class="card"><span class="ic">&#127760;</span><h4>serviceName</h4><p>指定 governing Service，它为副本创建 DNS SRV 记录，负责 StatefulSet 的 DNS 子域。</p></div>
+  <div class="card"><span class="ic">&#128190;</span><h4>volumeClaimTemplates</h4><p>为每个 Pod 动态创建一个独立的 PVC，并给它们起好能互相关联的名字。</p></div>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f sts.yml
+statefulset.apps/tkb-sts created
+
+$ kubectl get sts --watch
+NAME      READY   AGE
+tkb-sts   0/3     14s
+tkb-sts   1/3     30s
+tkb-sts   2/3     60s
+tkb-sts   3/3     90s
+
+$ kubectl get pvc
+NAME                STATUS   VOLUME            CAPACITY   MODES   STORAGECLASS   AGE
+webroot-tkb-sts-0   Bound    pvc-1146...f274   1Gi        RWO     block          100s
+webroot-tkb-sts-1   Bound    pvc-3026...6bcb   1Gi        RWO     block          70s
+webroot-tkb-sts-2   Bound    pvc-2ce7...e56d   1Gi        RWO     block          40s
+</pre>
+</div>
+
+<p>每隔约 30 秒多一个副本——这就是控制器在逐个启动。PVC 的 AGE 也正好相差 30 秒，每个都是和对应的 Pod 一起创建的。</p>
+
+<h2 id="peer">测试对等发现</h2>
+
+<p>Kubernetes 按如下规则构造 StatefulSet Pod 的 DNS 名：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 120" role="img" aria-label="StatefulSet Pod 的 DNS 名结构">
+  <text class="mono ttl" x="380" y="40" text-anchor="middle" style="font-size:19px">
+    <tspan class="on-b">tkb-sts-0</tspan>.<tspan class="on-a">dullahan</tspan>.<tspan class="on-p">default</tspan>.svc.<tspan class="on-g">cluster.local</tspan>
+  </text>
+  <text class="sm on-b" x="150" y="80" text-anchor="middle">Pod 名</text>
+  <text class="sm on-a" x="300" y="80" text-anchor="middle">governing Service 名</text>
+  <text class="sm on-p" x="440" y="80" text-anchor="middle">Namespace</text>
+  <text class="sm on-g" x="600" y="80" text-anchor="middle">集群域</text>
+  <path class="ln-b" d="M200 50 L160 68"/><path class="ln-a" d="M300 50 V68"/><path class="ln-p" d="M395 50 L430 68"/><path class="ln-g" d="M540 50 L590 68"/>
+  <text class="sm" x="380" y="108" text-anchor="middle">&lt;对象名&gt;.&lt;service 名&gt;.&lt;namespace&gt;.svc.cluster.local —— 可预测，而且永远不变</text>
+</svg>
+<figcaption>图 12-5　每个副本都有自己稳定的 DNS 名</figcaption>
+</figure>
+
+<p>部署一个预装了 <code>dig</code> 的 jump Pod 来验证：</p>
+
+<div class="code" data-lang="yaml" data-file="statefulsets/jump-pod.yml">
+<pre>
+apiVersion: v1
+kind: Pod
+metadata:
+  name: jump-pod
+spec:
+  terminationGracePeriodSeconds: 1
+  containers:
+  - image: registry.k8s.io/e2e-test-images/jessie-dnsutils:1.7
+    name: jump-ctr
+    tty: true
+    stdin: true
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f jump-pod.yml
+$ kubectl exec -it jump-pod -- bash
+
+root@jump-pod:/# dig SRV dullahan.default.svc.cluster.local
+;; QUESTION SECTION:
+;dullahan.default.svc.cluster.local. IN SRV
+
+;; ANSWER SECTION:
+dullahan.default.svc.cluster.local. 30 IN SRV ... tkb-sts-1.dullahan.default.svc.cluster.local.
+dullahan.default.svc.cluster.local. 30 IN SRV ... tkb-sts-0.dullahan.default.svc.cluster.local.
+dullahan.default.svc.cluster.local. 30 IN SRV ... tkb-sts-2.dullahan.default.svc.cluster.local.
+
+;; ADDITIONAL SECTION:
+tkb-sts-0.dullahan.default.svc.cluster.local. 30 IN A 10.60.0.5
+tkb-sts-2.dullahan.default.svc.cluster.local. 30 IN A 10.60.1.7
+tkb-sts-1.dullahan.default.svc.cluster.local. 30 IN A 10.60.2.12
+
+root@jump-pod:/# exit
+</pre>
+</div>
+
+<p>
+  问 <code>dullahan.default.svc.cluster.local</code>（QUESTION）会得到三个 Pod 的 DNS 名（ANSWER，SRV 记录），以及这些名字对应的 IP（ADDITIONAL，A 记录）。
+  比如一个 MongoDB 副本集的成员，就能用这种方式找到彼此。
+</p>
+
+<h2 id="scaling">扩缩 StatefulSet</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="缩容只删 Pod 不删 PVC，扩容时新 Pod 接回原 PVC">
+  <text class="ttl" x="130" y="24" text-anchor="middle">3 个副本</text>
+  <text class="ttl" x="380" y="24" text-anchor="middle">缩容到 2</text>
+  <text class="ttl" x="630" y="24" text-anchor="middle">扩回 3</text>
+  <g>
+    <rect class="bx-b" x="40" y="40" width="54" height="34" rx="6"/><text class="sm" x="67" y="62" text-anchor="middle">Pod 0</text>
+    <rect class="bx-b" x="103" y="40" width="54" height="34" rx="6"/><text class="sm" x="130" y="62" text-anchor="middle">Pod 1</text>
+    <rect class="bx-b" x="166" y="40" width="54" height="34" rx="6"/><text class="sm" x="193" y="62" text-anchor="middle">Pod 2</text>
+    <rect class="bx-g" x="40" y="100" width="54" height="34" rx="6"/><text class="sm" x="67" y="122" text-anchor="middle">PVC 0</text>
+    <rect class="bx-g" x="103" y="100" width="54" height="34" rx="6"/><text class="sm" x="130" y="122" text-anchor="middle">PVC 1</text>
+    <rect class="bx-g" x="166" y="100" width="54" height="34" rx="6"/><text class="sm" x="193" y="122" text-anchor="middle">PVC 2</text>
+    <path class="ln" d="M67 76 V96"/><path class="ln" d="M130 76 V96"/><path class="ln" d="M193 76 V96"/>
+  </g>
+  <g>
+    <rect class="bx-b" x="290" y="40" width="54" height="34" rx="6"/><text class="sm" x="317" y="62" text-anchor="middle">Pod 0</text>
+    <rect class="bx-b" x="353" y="40" width="54" height="34" rx="6"/><text class="sm" x="380" y="62" text-anchor="middle">Pod 1</text>
+    <rect class="bx-r" x="416" y="40" width="54" height="34" rx="6" stroke-dasharray="5 4"/><text class="sm on-r" x="443" y="62" text-anchor="middle">✗</text>
+    <rect class="bx-g" x="290" y="100" width="54" height="34" rx="6"/><text class="sm" x="317" y="122" text-anchor="middle">PVC 0</text>
+    <rect class="bx-g" x="353" y="100" width="54" height="34" rx="6"/><text class="sm" x="380" y="122" text-anchor="middle">PVC 1</text>
+    <rect class="bx-g" x="416" y="100" width="54" height="34" rx="6"/><text class="sm" x="443" y="122" text-anchor="middle">PVC 2</text>
+    <path class="ln" d="M317 76 V96"/><path class="ln" d="M380 76 V96"/>
+    <text class="sm" x="380" y="160" text-anchor="middle">PVC 2 仍是 Bound，</text>
+    <text class="sm" x="380" y="178" text-anchor="middle">但 Used by 显示 &lt;none&gt;</text>
+  </g>
+  <g>
+    <rect class="bx-b" x="540" y="40" width="54" height="34" rx="6"/><text class="sm" x="567" y="62" text-anchor="middle">Pod 0</text>
+    <rect class="bx-b" x="603" y="40" width="54" height="34" rx="6"/><text class="sm" x="630" y="62" text-anchor="middle">Pod 1</text>
+    <rect class="bx-a" x="666" y="40" width="54" height="34" rx="6"/><text class="sm on-a" x="693" y="62" text-anchor="middle">Pod 2</text>
+    <rect class="bx-g" x="540" y="100" width="54" height="34" rx="6"/><text class="sm" x="567" y="122" text-anchor="middle">PVC 0</text>
+    <rect class="bx-g" x="603" y="100" width="54" height="34" rx="6"/><text class="sm" x="630" y="122" text-anchor="middle">PVC 1</text>
+    <rect class="bx-g" x="666" y="100" width="54" height="34" rx="6"/><text class="sm" x="693" y="122" text-anchor="middle">PVC 2</text>
+    <path class="ln" d="M567 76 V96"/><path class="ln" d="M630 76 V96"/><path class="ln-a" d="M693 76 V96"/>
+    <text class="sm" x="630" y="160" text-anchor="middle">只需新建 Pod，</text>
+    <text class="sm on-a" x="630" y="178" text-anchor="middle">自动接回原来的 PVC 2</text>
+  </g>
+  <path class="ln" d="M232 90 H278" marker-end="url(#ar)"/><path class="ln" d="M482 90 H528" marker-end="url(#ar)"/>
+</svg>
+<figcaption>图 12-6　扩容会创建 Pod 和 PVC；缩容只删除 Pod</figcaption>
+</figure>
+
+<p>把 <code>sts.yml</code> 里的 <code>replicas</code> 从 3 改成 2，重新 apply：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f sts.yml
+statefulset.apps/tkb-sts configured
+
+$ kubectl get pods
+NAME        READY   STATUS    RESTARTS   AGE
+tkb-sts-0   1/1     Running   0          12h
+tkb-sts-1   1/1     Running   0          12h
+
+$ kubectl get pvc          # 三个 PVC 都还在
+NAME                STATUS   VOLUME            CAPACITY   MODES   STORAGECLASS
+webroot-tkb-sts-0   Bound    pvc-5955...d71c   1Gi        RWO     block
+webroot-tkb-sts-1   Bound    pvc-d62c...v701   1Gi        RWO     block
+webroot-tkb-sts-2   Bound    pvc-2e2f...5f95   1Gi        RWO     block
+</pre>
+</div>
+
+<p>再把 replicas 改回 3 并 apply，然后验证新的 <code>tkb-sts-2</code> 挂上了原来的卷：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f sts.yml
+$ kubectl describe pod tkb-sts-2 | grep ClaimName
+    ClaimName:  webroot-tkb-sts-2
+</pre>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th>知识点</th><th>说明</th></tr>
+  <tr><td>失败时暂停缩容</td><td>如果有 Pod 处于失败状态，Kubernetes 会暂停缩容操作，以保护应用的韧性和数据完整性。</td></tr>
+  <tr><td><code>podManagementPolicy</code></td><td>默认 <code>OrderedReady</code>（逐个启停）。改成 <code>Parallel</code> 会像 Deployment 一样并行创建/删除（例如 2→5 立刻建 3 个），但命名规则不变，且只影响扩缩，不影响发布和回滚。</td></tr>
+  <tr><td>滚动更新</td><td>修改镜像版本后 apply，控制器<strong>从最高序号开始</strong>逐个替换，每个新 Pod Ready 后才替换下一个。详见 <code>kubectl explain sts.spec.updateStrategy</code>。</td></tr>
+</table>
+</div>
+
+<h2 id="failure">测试 Pod 故障与节点故障</h2>
+
+<h3>Pod 故障</h3>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl delete pod tkb-sts-0
+pod "tkb-sts-0" deleted
+
+$ kubectl get pods --watch
+NAME        READY   STATUS              RESTARTS   AGE
+tkb-sts-0   1/1     Running             0          12h
+tkb-sts-1   1/1     Running             0          12h
+tkb-sts-2   1/1     Running             0          10m
+tkb-sts-0   0/1     Terminating         0          12h
+tkb-sts-0   0/1     Pending             0          0s
+tkb-sts-0   0/1     ContainerCreating   0          0s
+tkb-sts-0   1/1     Running             0          8s
+
+$ kubectl describe pod tkb-sts-0 | grep ClaimName
+    ClaimName:  webroot-tkb-sts-0
+</pre>
+</div>
+
+<p>新 Pod 名字相同，连接的也是原来的 PVC。</p>
+
+<h3>节点故障</h3>
+
+<p>先看看副本分布在哪些节点：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl get pods -o wide
+NAME        READY   STATUS    AGE   IP           NODE
+tkb-sts-0   1/1     Running   11m   10.2.0.132   lke343745-544835-5547cbe00000
+tkb-sts-1   1/1     Running   12h   10.2.0.3     lke343745-544835-1fbc7b870000
+tkb-sts-2   1/1     Running   21m   10.2.1.7     lke343745-544835-2b6286320000
+</pre>
+</div>
+
+<p>模拟节点故障：</p>
+<ul>
+  <li><strong>LKE</strong>：控制台 → Kubernetes → 你的集群 → Node Pool，对运行着某个副本的节点点 <strong>Recycle</strong>（删除并替换该节点）。</li>
+  <li><strong>Docker Desktop 多节点（kind）</strong>：Containers 页面里删除与工作节点同名的容器（如 <code>desktop-worker2</code>）。之后要删掉并重建集群才能恢复 3 个节点；单节点（kubeadm）集群无法做这个实验。</li>
+</ul>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl get pods -o wide --watch
+NAME        READY   STATUS              AGE    IP           NODE
+tkb-sts-0   1/1     Running             14m    10.2.0.132   lke343745...cbe00000
+tkb-sts-0   1/1     Terminating         14m    10.2.0.132   lke343745...cbe00000
+tkb-sts-0   0/1     Completed           14m    10.2.0.132   lke343745...cbe00000
+tkb-sts-0   0/1     Pending             0s     &lt;none&gt;       &lt;none&gt;
+tkb-sts-0   0/1     Pending             0s     &lt;none&gt;       lke343745...7b870000
+tkb-sts-0   0/1     ContainerCreating   0s     &lt;none&gt;       lke343745...7b870000
+tkb-sts-0   1/1     Running             111s   10.2.0.4     lke343745...7b870000
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 242" role="img" aria-label="节点故障后 StatefulSet Pod 在另一个节点上以相同名字重建并接回同一个卷">
+  <rect class="bx-r" x="20" y="20" width="220" height="110" rx="12" stroke-dasharray="6 4"/>
+  <text class="ttl on-r" x="130" y="44" text-anchor="middle">节点 …cbe00000 ✗</text>
+  <rect class="bx" x="60" y="60" width="140" height="50" rx="8" stroke-dasharray="5 4"/>
+  <text class="mono sm" x="130" y="82" text-anchor="middle">tkb-sts-0</text>
+  <text class="sm on-r" x="130" y="100" text-anchor="middle">Terminating</text>
+
+  <rect class="bx-g" x="520" y="20" width="220" height="110" rx="12"/>
+  <text class="ttl on-g" x="630" y="44" text-anchor="middle">节点 …7b870000</text>
+  <rect class="bx-b" x="560" y="60" width="140" height="50" rx="8"/>
+  <text class="mono sm" x="630" y="82" text-anchor="middle">tkb-sts-0</text>
+  <text class="sm on-g" x="630" y="100" text-anchor="middle">同名、新 IP</text>
+
+  <rect class="bx-p" x="290" y="150" width="180" height="50" rx="10"/>
+  <text class="mono sm on-p" x="380" y="172" text-anchor="middle">webroot-tkb-sts-0</text>
+  <text class="sm" x="380" y="190" text-anchor="middle">数据都还在</text>
+  <path class="ln-d" d="M130 132 L300 160"/>
+  <path class="ln-g" d="M630 132 L466 162" marker-end="url(#ar-g)"/>
+  <path class="ln-a" d="M244 75 H516" marker-end="url(#ar-a)"/>
+  <text class="sm on-a" x="380" y="66" text-anchor="middle">StatefulSet 控制器调和：期望 3 个，实际 2 个</text>
+  <text class="sm" x="380" y="230" text-anchor="middle">ContainerCreating 可能会「卡」一会儿：在等旧的卷挂载释放</text>
+</svg>
+<figcaption>图 12-7　节点故障恢复：名字和卷都跟着走</figcaption>
+</figure>
+
+<p>
+  Kubernetes 发现节点消失后终止原 Pod，副本数从 3 降到 2，控制器随即创建新的 <code>tkb-sts-0</code>；调度器把它放到幸存节点上，释放旧的卷挂载后重新绑定 PVC，最终回到 3 个副本。
+  注意：即使 LKE 用新节点替换了被回收的节点，Kubernetes 也<strong>不会</strong>自动把已有副本重新平衡到新节点上。
+</p>
+
+<h2 id="delete">删除 StatefulSet 与清理</h2>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl scale sts tkb-sts --replicas=0     # 先缩容到 0，保证有序关闭
+statefulset.apps/tkb-sts scaled
+
+$ kubectl get sts tkb-sts
+NAME      READY   AGE
+tkb-sts   0/0     13h
+
+$ kubectl delete sts tkb-sts
+$ kubectl delete pod jump-pod
+$ kubectl delete svc dullahan
+$ kubectl delete pvc webroot-tkb-sts-0 webroot-tkb-sts-1 webroot-tkb-sts-2
+$ kubectl delete sc block
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 别忘了卷</div>
+  <p>删除 StatefulSet 不会删除 PVC。删除 PVC 会（因为 <code>reclaimPolicy: Delete</code>）连带删除 PV 和云端存储；如果用的是你自己的 SC，请到存储后端确认外部卷确实被删了，否则会持续产生费用。</p>
+</div>
+
+<h2 id="summary">小结</h2>
+<ul>
+  <li>StatefulSet 用于部署和管理有状态应用，提供 Deployment 没有的三项能力：可预测且持久的 Pod/DNS 名、持久的卷绑定、有序的启停。</li>
+  <li>Pod 名为 <code>&lt;sts 名&gt;-&lt;序号&gt;</code>，按序逐个创建，缩容从最高序号逆序进行；滚动更新也从最高序号开始。</li>
+  <li><code>volumeClaimTemplates</code> 为每个 Pod 创建独立的 PVC；缩容不删 PVC，替换或扩回的 Pod 会接回原来的卷。</li>
+  <li>headless Service（<code>clusterIP: None</code>）作为 governing Service，为每个 Pod 注册 DNS 记录，实现对等发现。</li>
+  <li>删除 StatefulSet 前先缩容到 0。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>在 <code>tkb-sts-1</code> 里写一个网页：<code>kubectl exec tkb-sts-1 -- sh -c 'echo hello-from-1 &gt; /usr/share/nginx/html/index.html'</code>，然后删除这个 Pod，等它重建后再 <code>cat</code> 一次，文件还在吗？</li>
+    <li>在 jump Pod 里 <code>curl tkb-sts-1.dullahan</code>，验证可以点名访问某个副本。</li>
+    <li>把 <code>podManagementPolicy</code> 设为 <code>Parallel</code>（需要新建 StatefulSet，这个字段不可变），扩容到 5，观察 Pod 的创建方式有何不同。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

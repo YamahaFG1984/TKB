@@ -1,0 +1,785 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 15 章 · 威胁建模 — Kubernetes 入门实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="15">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 15 章</span>
+<h1>用 STRIDE 给 Kubernetes 做威胁建模</h1>
+<p class="lede">
+  安全比以往任何时候都重要。在动手加固之前，先系统地想一想：<strong>攻击者可能从哪里下手？</strong>
+  <strong>威胁建模</strong>就是识别薄弱环节、从而采取预防和缓解措施的过程。这一章用流行的 <strong>STRIDE</strong> 模型逐一审视 Kubernetes。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>说出 STRIDE 六类威胁分别是什么</li>
+    <li>对每类威胁，知道 Kubernetes 中有哪些对应的防护手段</li>
+    <li>掌握 Pod 的 <code>securityContext</code> 常用安全设置</li>
+    <li>用 Pod Security Standards（PSS）和 Pod Security Admission（PSA）统一执行 Pod 安全策略</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="stride">STRIDE 模型</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="STRIDE 六类威胁">
+  <g>
+    <rect class="bx-r" x="20" y="14" width="232" height="104" rx="12"/>
+    <text class="ttl on-r" x="40" y="44" style="font-size:26px">S</text>
+    <text class="ttl" x="70" y="40">Spoofing 仿冒</text>
+    <text class="sm" x="40" y="68">冒充别人以获得额外权限</text>
+    <text class="sm" x="40" y="92">→ mTLS、受保护的 CA、</text>
+    <text class="sm" x="40" y="108">　ServiceAccount 令牌</text>
+  </g>
+  <g>
+    <rect class="bx-a" x="264" y="14" width="232" height="104" rx="12"/>
+    <text class="ttl on-a" x="284" y="44" style="font-size:26px">T</text>
+    <text class="ttl" x="314" y="40">Tampering 篡改</text>
+    <text class="sm" x="284" y="68">恶意修改组件、配置、镜像</text>
+    <text class="sm" x="284" y="92">→ TLS、限制访问、校验和、</text>
+    <text class="sm" x="284" y="108">　只读文件系统</text>
+  </g>
+  <g>
+    <rect class="bx-p" x="508" y="14" width="232" height="104" rx="12"/>
+    <text class="ttl on-p" x="528" y="44" style="font-size:26px">R</text>
+    <text class="ttl" x="558" y="40">Repudiation 抵赖</text>
+    <text class="sm" x="528" y="68">让人无法证明谁做了什么</text>
+    <text class="sm" x="528" y="92">→ 审计日志、集中存储、</text>
+    <text class="sm" x="528" y="108">　文件监控</text>
+  </g>
+  <g>
+    <rect class="bx-b" x="20" y="132" width="232" height="104" rx="12"/>
+    <text class="ttl on-b" x="40" y="162" style="font-size:26px">I</text>
+    <text class="ttl" x="70" y="158">Information disclosure</text>
+    <text class="sm" x="40" y="186">信息泄露：敏感数据外流</text>
+    <text class="sm" x="40" y="210">→ 保护 etcd、KMS v2 信封加密、</text>
+    <text class="sm" x="40" y="226">　Secret</text>
+  </g>
+  <g>
+    <rect class="bx-g" x="264" y="132" width="232" height="104" rx="12"/>
+    <text class="ttl on-g" x="284" y="162" style="font-size:26px">D</text>
+    <text class="ttl" x="314" y="158">Denial of service</text>
+    <text class="sm" x="284" y="186">拒绝服务：让系统不可用</text>
+    <text class="sm" x="284" y="210">→ 高可用、资源限制、配额、</text>
+    <text class="sm" x="284" y="226">　网络策略</text>
+  </g>
+  <g>
+    <rect class="bx" x="508" y="132" width="232" height="104" rx="12"/>
+    <text class="ttl on-r" x="528" y="162" style="font-size:26px">E</text>
+    <text class="ttl" x="558" y="158">Elevation of privilege</text>
+    <text class="sm" x="528" y="186">权限提升：获得超出授予的权限</text>
+    <text class="sm" x="528" y="210">→ RBAC、非 root、capabilities、</text>
+    <text class="sm" x="528" y="226">　seccomp、PSA</text>
+  </g>
+</svg>
+<figcaption>图 15-1　STRIDE：六个首字母，六类威胁</figcaption>
+</figure>
+
+<p>STRIDE 提供了一种结构化的评估方式，但没有哪个模型能保证覆盖所有威胁。本章不求面面俱到，而是给你思路、带你上路。</p>
+
+<h2 id="spoofing">S · 仿冒（Spoofing）</h2>
+
+<p>仿冒就是<strong>假装成别人，以获得额外的权限</strong>。</p>
+
+<h3>保护与 API 服务器的通信</h3>
+<p>
+  Kubernetes 由很多小组件组成：API 服务器、控制器管理器、调度器、集群存储，以及节点上的 kubelet 和容器运行时。每个都有自己的权限，仿冒其中任何一个都可能出问题。
+  Kubernetes 要求所有组件通过加密签名的证书相互认证（<strong>mTLS</strong>），并会自动轮换证书。但要注意：
+</p>
+<ol>
+  <li>典型安装会自动生成一个<strong>自签名 CA</strong> 给所有组件签发证书。有总比没有强，但单靠它不足以应对生产环境；</li>
+  <li>mTLS 的安全性取决于签发证书的 CA。<strong>CA 一旦被攻破，整个 mTLS 层就形同虚设</strong>，务必保护好 CA！</li>
+</ol>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 220" role="img" aria-label="API 服务器用两套信任密钥对分别认证内部和外部系统">
+  <rect class="bx-b" x="280" y="70" width="200" height="80" rx="14"/>
+  <text class="ttl on-b" x="380" y="104" text-anchor="middle">API 服务器</text>
+  <text class="sm" x="380" y="126" text-anchor="middle">两套受信任的密钥对</text>
+
+  <rect class="bx-a" x="20" y="20" width="200" height="70" rx="12"/>
+  <text class="ttl on-a" x="120" y="46" text-anchor="middle">集群自签名 CA</text>
+  <text class="sm" x="120" y="68" text-anchor="middle">只给内部组件签证书</text>
+  <rect class="bx" x="20" y="130" width="200" height="70" rx="12"/>
+  <text class="lbl" x="120" y="156" text-anchor="middle">内部系统</text>
+  <text class="sm" x="120" y="178" text-anchor="middle">kubelet、调度器、控制器……</text>
+
+  <rect class="bx-g" x="540" y="20" width="200" height="70" rx="12"/>
+  <text class="ttl on-g" x="640" y="46" text-anchor="middle">受信任的第三方 CA</text>
+  <text class="sm" x="640" y="68" text-anchor="middle">给外部系统签证书</text>
+  <rect class="bx" x="540" y="130" width="200" height="70" rx="12"/>
+  <text class="lbl" x="640" y="156" text-anchor="middle">外部系统</text>
+  <text class="sm" x="640" y="178" text-anchor="middle">用户、CI/CD、外部工具</text>
+
+  <path class="ln-a" d="M120 92 V126" marker-end="url(#ar-a)"/>
+  <path class="ln-g" d="M640 92 V126" marker-end="url(#ar-g)"/>
+  <path class="ln" d="M222 165 L276 128" marker-end="url(#ar)"/>
+  <path class="ln" d="M538 165 L484 128" marker-end="url(#ar)"/>
+  <text class="sm on-r" x="380" y="196" text-anchor="middle">内部 CA 只在集群内被信任，不要加入任何外部系统的信任列表</text>
+</svg>
+<figcaption>图 15-2　内外分开信任，并严格审批证书签名请求（CSR）</figcaption>
+</figure>
+
+<h3>保护 Pod 之间的通信</h3>
+<p>
+  除了仿冒集群访问，还可能出现一个 Pod 仿冒另一个 Pod。每个 Pod 都关联一个 <strong>ServiceAccount</strong> 作为身份，ServiceAccount 令牌会以 Secret 的形式<strong>自动挂载</strong>进每个 Pod。注意两点：
+  ① 这个令牌<strong>可以访问 API 服务器</strong>；② 大多数 Pod 根本不需要访问 API 服务器。所以对不需要的 Pod，关掉自动挂载：
+</p>
+
+<div class="code" data-lang="yaml">
+<pre>
+apiVersion: v1
+kind: Pod
+metadata:
+  name: service-account-example-pod
+spec:
+  serviceAccountName: some-service-account
+  automountServiceAccountToken: false      # ← 就是这一行
+</pre>
+</div>
+
+<p>确实需要访问 API 服务器的 Pod，可以用投射卷（projected volume）给令牌设置<strong>过期时间</strong>和<strong>受众</strong>，限制它的有效期和可用范围：</p>
+
+<div class="code" data-lang="yaml">
+<pre>
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+spec:
+  containers:
+  - image: nginx
+    name: nginx
+    volumeMounts:
+    - mountPath: /var/run/secrets/tokens
+      name: vault-token
+  serviceAccountName: my-pod
+  volumes:
+  - name: vault-token
+    projected:
+      sources:
+      - serviceAccountToken:
+          path: vault-token
+          expirationSeconds: 3600     # ← 1 小时后过期
+          audience: vault             # ← 只对 vault 有效
+</pre>
+</div>
+
+<h2 id="tampering">T · 篡改（Tampering）</h2>
+
+<p>
+  篡改是以恶意方式修改某样东西，从而造成<strong>拒绝服务</strong>（让资源不可用）或<strong>权限提升</strong>（获得额外权限）。
+  篡改往往很难完全避免，所以常见对策是<strong>让篡改变得显而易见</strong>——就像非处方药包装上的防拆封条。
+</p>
+
+<p>可能被篡改的 Kubernetes 组件：etcd；API 服务器、控制器管理器、调度器、etcd、kubelet 的配置文件；容器运行时二进制；容器镜像；Kubernetes 二进制。</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="传输中与静态数据的防篡改措施">
+  <rect class="bx-b" x="20" y="14" width="350" height="200" rx="14"/>
+  <text class="ttl on-b" x="195" y="40" text-anchor="middle">传输中（in transit）</text>
+  <text class="sm" x="195" y="62" text-anchor="middle">数据在网络上传输时</text>
+  <rect class="bx" x="50" y="82" width="90" height="40" rx="8"/><text class="sm" x="95" y="107" text-anchor="middle">发送方</text>
+  <rect class="bx" x="250" y="82" width="90" height="40" rx="8"/><text class="sm" x="295" y="107" text-anchor="middle">接收方</text>
+  <path class="ln-b" d="M142 102 H246" marker-end="url(#ar-b)"/>
+  <text class="sm on-b" x="194" y="94" text-anchor="middle">TLS</text>
+  <text class="sm" x="40" y="156">TLS 自带完整性保证，</text>
+  <text class="sm" x="40" y="176">数据被篡改时会发出警告</text>
+
+  <rect class="bx-a" x="390" y="14" width="350" height="200" rx="14"/>
+  <text class="ttl on-a" x="565" y="40" text-anchor="middle">静态（at rest）</text>
+  <text class="sm" x="565" y="62" text-anchor="middle">数据在内存或磁盘上时</text>
+  <text class="sm" x="410" y="90">· 限制对运行 K8s 组件的服务器的访问</text>
+  <text class="sm" x="410" y="112">· 限制对存放配置文件的仓库的访问</text>
+  <text class="sm" x="410" y="134">· 只通过 SSH 远程引导（保管好密钥）</text>
+  <text class="sm" x="410" y="156">· 下载后始终校验 SHA-2 校验和</text>
+  <text class="sm" x="410" y="178">· 限制对镜像仓库的访问</text>
+  <text class="sm" x="410" y="200">· 对关键二进制和配置做审计告警</text>
+</svg>
+<figcaption>图 15-3　按数据所处位置分别防护</figcaption>
+</figure>
+
+<p>例如，用 Linux 审计守护进程监控对 docker 二进制的访问及属性修改：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ auditctl -w /usr/bin/docker -p wxa -k audit-docker
+</pre>
+</div>
+
+<h3>防止篡改运行中的应用</h3>
+<p>把 Pod 的文件系统设为只读，可以保证文件系统不可变：</p>
+
+<div class="code" data-lang="yaml">
+<pre>
+apiVersion: v1
+kind: Pod
+metadata:
+  name: readonly-test
+spec:
+  securityContext:
+    readOnlyRootFilesystem: true   # 只读的根文件系统
+    allowedHostPaths:              # 让这个挂载点
+    - pathPrefix: "/test"          # 下面的一切
+      readOnly: true               # 都是只读的
+</pre>
+</div>
+
+<h2 id="repudiation">R · 抵赖（Repudiation）</h2>
+
+<p>
+  抵赖是制造怀疑；<strong>不可抵赖（non-repudiation）</strong>则是提供证据——在信息安全里，就是证明某人确实做了某事。不可抵赖要能证明：
+</p>
+
+<div class="cards">
+  <div class="card"><h4>发生了什么</h4><p>What</p></div>
+  <div class="card"><h4>何时发生</h4><p>When</p></div>
+  <div class="card"><h4>谁干的</h4><p>Who</p></div>
+  <div class="card"><h4>在哪里</h4><p>Where</p></div>
+  <div class="card"><h4>为什么</h4><p>Why —— 最难，通常要关联一段时间内的多个事件</p></div>
+  <div class="card"><h4>怎么做到的</h4><p>How —— 同样困难</p></div>
+</div>
+
+<p>审计 API 服务器事件能帮你回答这些问题（可能需要先在 API 服务器上启用审计）：</p>
+
+<div class="code" data-lang="json" data-file="API 服务器审计事件">
+<pre>
+{
+  "kind": "Event",
+  "apiVersion": "audit.k8s.io/v1",
+  "level": "Metadata",
+  "timestamp": "2022-11-11T10:10:00Z",
+  "auditID": "7e0cbccf-8d8a-4f5f-aefb-60b8af2d2ad5",
+  "stage": "RequestReceived",
+  "requestURI": "/api/v1/namespaces/default/persistentvolumeclaims",
+  "verb": "list",
+  "user": {
+    "username": "fname.lname@example.com",
+    "groups": [ "system:authenticated" ]
+  },
+  "sourceIPs": [ "123.45.67.123" ],
+  "objectRef": {
+    "resource": "persistentvolumeclaims",
+    "namespace": "default",
+    "apiVersion": "v1"
+  }
+}
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="DaemonSet 代理收集各节点日志并发送到安全的集中存储">
+  <rect class="bx" x="20" y="20" width="170" height="110" rx="12"/>
+  <text class="lbl" x="105" y="42" text-anchor="middle">节点 1</text>
+  <rect class="bx-a" x="36" y="54" width="138" height="30" rx="6"/><text class="sm on-a" x="105" y="74" text-anchor="middle">日志代理（DaemonSet）</text>
+  <text class="sm" x="105" y="104" text-anchor="middle">运行时 · kubelet · 应用</text>
+  <rect class="bx" x="210" y="20" width="170" height="110" rx="12"/>
+  <text class="lbl" x="295" y="42" text-anchor="middle">节点 2</text>
+  <rect class="bx-a" x="226" y="54" width="138" height="30" rx="6"/><text class="sm on-a" x="295" y="74" text-anchor="middle">日志代理（DaemonSet）</text>
+  <text class="sm" x="295" y="104" text-anchor="middle">运行时 · kubelet · 应用</text>
+  <rect class="bx" x="400" y="20" width="140" height="110" rx="12"/>
+  <text class="lbl" x="470" y="42" text-anchor="middle">API 服务器</text>
+  <text class="sm" x="470" y="80" text-anchor="middle">审计日志</text>
+  <text class="sm" x="470" y="104" text-anchor="middle">防火墙等非 K8s 设施</text>
+
+  <rect class="bx-g" x="580" y="40" width="160" height="80" rx="12"/>
+  <text class="ttl on-g" x="660" y="70" text-anchor="middle">集中日志存储</text>
+  <text class="sm" x="660" y="94" text-anchor="middle">必须安全可信</text>
+  <path class="ln" d="M105 132 V170 H660 V122" marker-end="url(#ar)"/>
+  <path class="ln" d="M295 132 V170"/>
+  <path class="ln" d="M470 132 V170"/>
+  <text class="sm on-r" x="380" y="196" text-anchor="middle">日志存储本身不安全，日志内容就可以被抵赖</text>
+</svg>
+<figcaption>图 15-4　收集所有组件的审计日志，集中存储并关联分析</figcaption>
+</figure>
+
+<p>前面启用了对 docker 二进制的审计后，执行 <code>docker run</code> 会产生类似这样的事件，和 Kubernetes 的审计关联起来，就构成了无法抵赖的完整证据链：</p>
+
+<div class="code" data-lang="text">
+<pre>
+type=SYSCALL msg=audit(1234567890.123:12345): arch=abc123 syscall=59 success=yes \
+  exit=0 ... uid=0 gid=0 euid=0 ... comm="docker" exe="/usr/bin/docker" \
+  key="audit-docker" type=CWD msg=audit(1234567890.123:12345): cwd="/home/firstname" \
+type=PATH msg=audit(1234567890.123:12345): item=0 name="/usr/bin/docker" ...
+</pre>
+</div>
+
+<h2 id="disclosure">I · 信息泄露（Information Disclosure）</h2>
+
+<p>信息泄露指敏感数据外流，常见的有数据存储被攻破、API 无意中暴露敏感数据。</p>
+
+<h3>保护集群数据</h3>
+<p>
+  集群的全部配置都在集群存储（etcd）里：网络和存储配置、密码、集群 CA……这让它成为信息泄露攻击的首要目标。至少应该限制并审计对 etcd 所在节点的访问。
+</p>
+<p>
+  Kubernetes 1.7 引入了 Secret 加密，但默认不开启；而且即使开启，<strong>数据加密密钥（DEK）和 Secret 存在同一节点上</strong>，拿到节点就能绕过加密。
+  1.11 引入了 KMS v1（beta），允许把<strong>密钥加密密钥（KEK）</strong>存在集群之外，这叫<strong>信封加密（envelope encryption）</strong>。
+  之后 KMS 被彻底重新设计为 <strong>KMS v2</strong>，自 v1.29 起 GA：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="KMS v2 信封加密">
+  <rect class="bx-d" x="20" y="14" width="470" height="222" rx="14"/>
+  <text class="sm" x="36" y="34">控制平面节点</text>
+  <rect class="bx-b" x="40" y="50" width="130" height="60" rx="10"/>
+  <text class="ttl on-b" x="105" y="76" text-anchor="middle">API 服务器</text>
+  <text class="sm" x="105" y="96" text-anchor="middle">写入 Secret</text>
+  <rect class="bx-a" x="210" y="50" width="130" height="60" rx="10"/>
+  <text class="ttl on-a" x="275" y="76" text-anchor="middle">KMS v2 插件</text>
+  <text class="sm" x="275" y="96" text-anchor="middle">Unix socket 通信</text>
+  <rect class="bx-g" x="40" y="146" width="300" height="70" rx="10"/>
+  <text class="ttl on-g" x="190" y="170" text-anchor="middle">etcd</text>
+  <text class="sm" x="190" y="192" text-anchor="middle">存：用 DEK 加密的 Secret</text>
+  <text class="sm" x="190" y="208" text-anchor="middle">+ 用 KEK 加密过的 DEK</text>
+  <path class="ln" d="M172 80 H206" marker-start="url(#ar)" marker-end="url(#ar)"/>
+  <path class="ln" d="M105 112 V142" marker-end="url(#ar)"/>
+  <text class="sm" x="365" y="150">每次写入都</text>
+  <text class="sm" x="365" y="168">生成新的 DEK</text>
+
+  <rect class="bx-r" x="560" y="40" width="180" height="90" rx="12"/>
+  <text class="ttl on-r" x="650" y="66" text-anchor="middle">外部 KMS / HSM</text>
+  <text class="sm" x="650" y="90" text-anchor="middle">保管 KEK</text>
+  <text class="sm" x="650" y="110" text-anchor="middle">（密钥加密密钥）</text>
+  <path class="ln-a" d="M342 80 H556" marker-start="url(#ar-a)" marker-end="url(#ar-a)"/>
+  <text class="sm on-a" x="450" y="72" text-anchor="middle">加密/解密 DEK</text>
+
+  <rect class="bx-g" x="520" y="156" width="220" height="70" rx="12"/>
+  <text class="sm" x="630" y="180" text-anchor="middle">攻击者必须同时攻破</text>
+  <text class="sm" x="630" y="198" text-anchor="middle">控制平面 <tspan class="on-r">和</tspan> 外部 KMS；</text>
+  <text class="sm" x="630" y="216" text-anchor="middle">一个节点快照读不出明文</text>
+</svg>
+<figcaption>图 15-5　信封加密：别把钥匙插在门上</figcaption>
+</figure>
+
+<ul>
+  <li>每次写操作生成新的 DEK，并用 KEK 加密后静态存储；</li>
+  <li>插件缓存大小只受控制平面节点资源限制，旧 DEK 可缓存在内存中加快加解密；</li>
+  <li>密钥轮换后重新加密 Secret 不需要 API 服务器停机或重启 Pod；</li>
+  <li>KMS 插件运行在控制平面节点上，通过 Unix socket 与 API 服务器通信，再连接外部 KMS 提供方处理 DEK 的加解密。</li>
+</ul>
+<p>建议把 KEK 存放在<strong>硬件安全模块（HSM）</strong>或云 KMS 中；同时遵循「信任但要验证」，确认加密真的在工作，并为 KEK 丢失或与外部 KMS 断连做好预案。</p>
+
+<h3>保护 Pod 里的数据</h3>
+<p>
+  Secret 是存放和共享密码等敏感数据的首选方式。例如前端容器访问加密的后端数据库时，把解密密钥以 Secret 挂载进去，远比放在明文文件或环境变量里好。
+  数据和配置也常存放在 PV 和 ConfigMap 中，如果它们是加密的，解密密钥应放在 Secret 里——但别忘了上一节关于 Secret 加密密钥存放位置的告诫：<strong>不要辛辛苦苦锁好门，却把钥匙插在门上。</strong>
+</p>
+
+<h2 id="dos">D · 拒绝服务（Denial of Service）</h2>
+
+<p>DoS 就是让东西不可用，最常见的是把系统压垮到无法响应。在 Kubernetes 中，压垮 API 服务器会让整个集群的运作陷入停顿（连内部组件都靠它通信）。</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="多层防御让应用难以被 DoS">
+  <rect class="bx-r" x="20" y="14" width="720" height="272" rx="16"/>
+  <text class="ttl on-r" x="40" y="38">防火墙：限制 API 服务器暴露到互联网</text>
+  <rect class="bx-a" x="50" y="52" width="660" height="222" rx="14"/>
+  <text class="ttl on-a" x="70" y="76">高可用：3 或 5 个控制平面节点 + 多个工作节点，分布在多个可用区</text>
+  <rect class="bx-p" x="80" y="90" width="600" height="172" rx="12"/>
+  <text class="ttl on-p" x="100" y="114">网络策略：限制 Pod 之间以及 Pod 与外部的通信</text>
+  <rect class="bx-b" x="110" y="128" width="540" height="122" rx="10"/>
+  <text class="ttl on-b" x="130" y="152">mTLS + 令牌认证：拒绝所有未经认证的请求</text>
+  <rect class="bx-g" x="140" y="166" width="480" height="72" rx="8"/>
+  <text class="ttl on-g" x="380" y="190" text-anchor="middle">Pod</text>
+  <text class="sm" x="380" y="210" text-anchor="middle">资源 requests/limits · podPidsLimit · 应用层最小权限授权</text>
+  <text class="sm" x="380" y="228" text-anchor="middle">Namespace 级 ResourceQuota 限制对象数量</text>
+</svg>
+<figcaption>图 15-6　纵深防御：攻击者要层层突破才能打垮一个应用</figcaption>
+</figure>
+
+<h3>保护集群资源</h3>
+<ul>
+  <li>生产环境运行多个控制平面节点（HA），并跨可用区分布——攻击者需要同时攻击多个节点或可用区才有效果；工作节点同理。</li>
+  <li>为内存、CPU、存储配置合理的限制，防止关键系统资源被耗尽。</li>
+  <li>限制 Namespace 中对象的数量（ReplicaSet、Pod、Service、Secret、ConfigMap……）：</li>
+</ul>
+
+<div class="code" data-lang="yaml">
+<pre>
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: pod-quota
+  namespace: skippy
+spec:
+  hard:
+    pods: "100"          # skippy 里最多 100 个 Pod
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; podPidsLimit：防 fork 炸弹</div>
+  <p>
+    fork 炸弹指恶意进程不断创建子进程直到耗尽系统资源。<code>podPidsLimit</code> 限制一个 Pod 能创建的进程数，把攻击影响限制在这个 Pod 内，
+    也防止单个 Pod 用光节点的 PID 范围（包括 kubelet 的）。Pod 耗尽限额时 Kubernetes 通常会重启它。设置合适的值需要大致估计每个节点会同时运行多少 Pod。
+  </p>
+</div>
+
+<h3>保护 API 服务器</h3>
+<p>API 服务器通过 TCP 暴露 REST 接口，是僵尸网络 DoS 攻击的目标。对策：高可用控制平面（多副本、多节点、多可用区）；基于合理阈值监控和告警 API 请求；用防火墙等手段限制它在互联网上的暴露。攻击者也可能仿冒用户或控制平面服务来制造过载，所以即使有健全的 RBAC，也必须严格保护高权限账号。</p>
+
+<h3>保护集群存储（etcd）</h3>
+<ul>
+  <li>配置 3 或 5 个节点的高可用 etcd 集群；</li>
+  <li>监控 etcd 请求并告警（从监控 etcd 日志开始）；</li>
+  <li>在网络层隔离 etcd，只允许控制平面成员访问；</li>
+  <li>大型生产集群应考虑<strong>独立的 etcd 集群</strong>：etcd 是大集群最常见的性能瓶颈，性能差的 etcd 和遭受持续 DoS 的 etcd 一样糟糕；独立部署还能防止被控制平面其他被攻破的部分波及。</li>
+</ul>
+
+<h2 id="elevation">E · 权限提升（Elevation of Privilege）</h2>
+
+<p>权限提升是获得超出授予范围的访问权，目的是造成破坏或未授权访问。</p>
+
+<h3>保护 API 服务器：多种授权模式</h3>
+<div class="tw">
+<table>
+  <tr><th>模式</th><th>说明</th></tr>
+  <tr><td><strong>RBAC</strong></td><td>把 API 操作限制给特定用户或系统服务（见第 13 章）。例如 Mia 能创建 Pod 吗？</td></tr>
+  <tr><td><strong>Webhook</strong></td><td>把授权交给外部基于 REST 的策略引擎。要额外构建和维护，而且外部引擎会成为每个请求的单点故障——它挂了，你可能完全无法访问 API 服务器</td></tr>
+  <tr><td><strong>Node</strong></td><td>专门授权 kubelet（节点）发出的 API 请求</td></tr>
+</table>
+</div>
+<p>应同时运行多个授权器，常见组合是 RBAC + Node。</p>
+
+<h3>保护 Pod</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="保护容器的多层安全设置">
+  <rect class="bx-r" x="20" y="14" width="720" height="262" rx="16"/>
+  <text class="ttl on-r" x="40" y="38">PSS / PSA：在 Namespace 级统一强制执行（本章最后）</text>
+  <rect class="bx-p" x="50" y="50" width="660" height="214" rx="14"/>
+  <text class="ttl on-p" x="70" y="74">强制访问控制（MAC）：AppArmor / SELinux —— 节点级配置，强制生效</text>
+  <rect class="bx-a" x="80" y="86" width="600" height="166" rx="12"/>
+  <text class="ttl on-a" x="100" y="110">seccomp：过滤系统调用（syscall）</text>
+  <rect class="bx-b" x="110" y="122" width="540" height="118" rx="10"/>
+  <text class="ttl on-b" x="130" y="146">capabilities：只给需要的那几项 root 能力</text>
+  <rect class="bx-g" x="140" y="158" width="480" height="70" rx="8"/>
+  <text class="ttl on-g" x="380" y="182" text-anchor="middle">容器进程</text>
+  <text class="mono sm" x="380" y="202" text-anchor="middle">runAsUser: 1000（非 root）</text>
+  <text class="mono sm" x="380" y="218" text-anchor="middle">allowPrivilegeEscalation: false</text>
+</svg>
+<figcaption>图 15-7　层层收紧容器的权限</figcaption>
+</figure>
+
+<h4>不要以 root 运行</h4>
+<p>
+  root（UID 0）是 Linux 上最强大的用户。以 root 运行应用进程几乎总是坏主意——它对容器拥有完全访问权，更糟的是，容器里的 root 有时对宿主机也有不受限的 root 权限。
+  Kubernetes 可以强制容器以非特权用户运行：
+</p>
+
+<div class="code" data-lang="yaml">
+<pre>
+apiVersion: v1
+kind: Pod
+metadata:
+  name: demo
+spec:
+  securityContext:          # 作用于 Pod 里所有容器
+    runAsUser: 1000         # 非 root 用户
+  containers:
+  - name: demo
+    image: example.io/simple:1.0
+    securityContext:
+      runAsUser: 2000       # 容器级设置覆盖 Pod 级
+</pre>
+</div>
+
+<p>
+  <code>runAsUser</code> 属于 PodSecurityContext（<code>spec.securityContext</code>）。如果多个不同的 Pod 用了相同的 UID，它们就有相同的安全上下文，
+  可能读写同一个卷导致数据损坏，或让被攻破的容器篡改本不该碰的数据。可以在容器级覆盖 UID，或者使用<strong>用户命名空间（user namespaces）</strong>：
+  进程在容器内是 root（UID 0），映射到宿主机上却是 UID 1000——适合确实需要在容器内以 root 运行的进程，但要确认你的 Kubernetes 版本和运行时完全支持。也可以维护一张 UID 使用映射表。
+</p>
+
+<h4>丢弃 capabilities</h4>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 170" role="img" aria-label="root 的权力由许多 capabilities 组成">
+  <rect class="bx-r" x="20" y="20" width="180" height="120" rx="12"/>
+  <text class="ttl on-r" x="110" y="54" text-anchor="middle">root</text>
+  <text class="sm" x="110" y="80" text-anchor="middle">= 全部 30 多项</text>
+  <text class="sm" x="110" y="100" text-anchor="middle">capabilities</text>
+  <text class="sm" x="110" y="124" text-anchor="middle">全有或全无</text>
+  <path class="ln" d="M202 80 H246" marker-end="url(#ar)"/>
+  <g>
+    <rect class="bx-g" x="250" y="20" width="110" height="34" rx="6"/><text class="mono sm" x="305" y="42" text-anchor="middle">NET_ADMIN ✓</text>
+    <rect class="bx-g" x="370" y="20" width="110" height="34" rx="6"/><text class="mono sm" x="425" y="42" text-anchor="middle">CHOWN ✓</text>
+    <rect class="bx" x="490" y="20" width="110" height="34" rx="6"/><text class="mono sm" x="545" y="42" text-anchor="middle">SYS_TIME</text>
+    <rect class="bx" x="610" y="20" width="130" height="34" rx="6"/><text class="mono sm" x="675" y="42" text-anchor="middle">SYS_ADMIN</text>
+    <rect class="bx" x="250" y="64" width="110" height="34" rx="6"/><text class="mono sm" x="305" y="86" text-anchor="middle">KILL</text>
+    <rect class="bx" x="370" y="64" width="110" height="34" rx="6"/><text class="mono sm" x="425" y="86" text-anchor="middle">SETUID</text>
+    <rect class="bx" x="490" y="64" width="110" height="34" rx="6"/><text class="mono sm" x="545" y="86" text-anchor="middle">NET_RAW</text>
+    <rect class="bx" x="610" y="64" width="130" height="34" rx="6"/><text class="mono sm" x="675" y="86" text-anchor="middle">……</text>
+  </g>
+  <text class="sm" x="495" y="126" text-anchor="middle">精确授予进程运行所需的那几项，其余全部丢弃</text>
+  <text class="sm" x="495" y="146" text-anchor="middle">SYS_TIME 可设置系统时钟；NET_ADMIN 可修改路由表、配置网卡</text>
+</svg>
+<figcaption>图 15-8　把 root 拆成小块，只拿需要的</figcaption>
+</figure>
+
+<p>
+  大多数应用不需要完整的 root 能力，但又比普通用户需要的多。很多运行时提供了一套合理的默认 capabilities，但通常不足以用于生产。
+  找出最小集合的常见方法：在测试环境里<strong>丢弃全部 capabilities</strong>运行应用，根据报错日志找出缺少的权限，映射成 capabilities 加回去，反复直到应用正常运行。
+  注意要充分测试（生产中遇到没测到的边缘情况会导致崩溃），而且每个新版本都要重新测试。
+</p>
+
+<div class="code" data-lang="yaml">
+<pre>
+apiVersion: v1
+kind: Pod
+metadata:
+  name: capability-test
+spec:
+  containers:
+  - name: demo
+    image: example.io/simple:1.0
+    securityContext:
+      capabilities:
+        add: ["NET_ADMIN", "CHOWN"]
+</pre>
+</div>
+
+<h4>过滤系统调用：seccomp</h4>
+<p>seccomp（secure computing）概念上和 capabilities 类似，但过滤的是<strong>系统调用</strong>——应用请求 Linux 内核执行操作的方式。它在 Kubernetes 1.19 GA，有四种配置文件：</p>
+
+<div class="tw">
+<table>
+  <tr><th>配置文件</th><th>行为</th><th>用途</th></tr>
+  <tr><td>Non-blocking</td><td>允许运行，但把每个 syscall 记录到审计日志</td><td>在测试环境收集应用需要的 syscall，用来制作自定义配置</td></tr>
+  <tr><td>Blocking</td><td>阻止所有 syscall</td><td>极其安全，但 Pod 什么也干不了</td></tr>
+  <tr><td>Runtime Default</td><td>使用容器运行时自带的配置</td><td>好的起点：在可用和安全之间取得平衡，并经过充分测试</td></tr>
+  <tr><td><strong>Custom</strong></td><td>只允许应用需要的 syscall，其余全部阻止</td><td>最小权限，安全角度的首选；风险是测试漏掉的边缘情况会在生产中失败</td></tr>
+</table>
+</div>
+
+<h4>强制访问控制：AppArmor 与 SELinux</h4>
+<p>
+  这是仅限 Linux 的技术，在节点级配置，再通过 Pod 的安全上下文应用到 Pod。它们控制进程如何与其他系统资源交互，配置较难（有工具可以读取审计日志生成配置文件）。
+  与 seccomp 和 capabilities 的「自愿」不同，它们一旦启用就是<strong>强制</strong>的。有些运行时会给所有容器应用默认的 SELinux 配置。配错会让应用无法工作，务必充分测试。
+</p>
+
+<h4>防止容器提权</h4>
+<p>
+  Linux 中创建新进程的唯一方式是一个进程克隆自己（父进程 → 子进程）。默认情况下，Linux 允许子进程获得比父进程更多的权限，这通常是坏事——
+  容器的安全配置是针对初始配置定义的，而不是针对可能被提升后的权限。用 <code>allowPrivilegeEscalation</code> 禁止它：
+</p>
+
+<div class="code" data-lang="yaml">
+<pre>
+apiVersion: v1
+kind: Pod
+metadata:
+  name: demo
+spec:
+  containers:
+  - name: demo
+    image: example.io/simple:1.0
+    securityContext:
+      allowPrivilegeEscalation: false    # ← 就是这一行
+</pre>
+</div>
+
+<h2 id="pss-psa">用 PSS 与 PSA 统一 Pod 安全</h2>
+
+<ul>
+  <li><strong>Pod Security Standards（PSS）</strong>：规定 Pod 必须满足哪些安全设置的<strong>策略</strong>；</li>
+  <li><strong>Pod Security Admission（PSA）</strong>：在创建 Pod 时<strong>执行</strong>这些策略。</li>
+</ul>
+<p>你选择要应用哪些 PSS 策略，由 PSA 负责执行。</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="三种 PSS 策略和三种 PSA 模式">
+  <text class="ttl" x="20" y="24">PSS：三种内置策略（社区维护，不能修改、导入或自建）</text>
+  <rect class="bx-r" x="20" y="38" width="230" height="84" rx="12"/>
+  <text class="ttl on-r" x="135" y="64" text-anchor="middle">privileged</text>
+  <text class="sm" x="135" y="88" text-anchor="middle">完全放开</text>
+  <text class="sm" x="135" y="106" text-anchor="middle">允许一切</text>
+  <rect class="bx-a" x="265" y="38" width="230" height="84" rx="12"/>
+  <text class="ttl on-a" x="380" y="64" text-anchor="middle">baseline</text>
+  <text class="sm" x="380" y="88" text-anchor="middle">合理的默认值</text>
+  <text class="sm" x="380" y="106" text-anchor="middle">挡住明显的危险配置</text>
+  <rect class="bx-g" x="510" y="38" width="230" height="84" rx="12"/>
+  <text class="ttl on-g" x="625" y="64" text-anchor="middle">restricted</text>
+  <text class="sm" x="625" y="88" text-anchor="middle">黄金标准、当前最佳实践</text>
+  <text class="sm" x="625" y="106" text-anchor="middle">很多 Pod 达不到</text>
+  <path class="ln" d="M20 136 H740" marker-end="url(#ar)"/>
+  <text class="sm" x="380" y="154" text-anchor="middle">越往右越安全、越严格</text>
+
+  <text class="ttl" x="20" y="186">PSA：三种执行模式（Namespace 级、验证型准入控制器）</text>
+  <rect class="bx-b" x="20" y="200" width="230" height="70" rx="12"/>
+  <text class="ttl on-b" x="135" y="226" text-anchor="middle">warn</text>
+  <text class="sm" x="135" y="250" text-anchor="middle">允许创建，给用户警告</text>
+  <rect class="bx-p" x="265" y="200" width="230" height="70" rx="12"/>
+  <text class="ttl on-p" x="380" y="226" text-anchor="middle">audit</text>
+  <text class="sm" x="380" y="250" text-anchor="middle">允许创建，记录审计事件</text>
+  <rect class="bx-r" x="510" y="200" width="230" height="70" rx="12"/>
+  <text class="ttl on-r" x="625" y="226" text-anchor="middle">enforce</text>
+  <text class="sm" x="625" y="250" text-anchor="middle">违规就拒绝</text>
+  <text class="mono sm" x="380" y="292" text-anchor="middle">标签格式：pod-security.kubernetes.io/&lt;模式&gt;: &lt;策略&gt;</text>
+</svg>
+<figcaption>图 15-9　PSS 定义「标准」，PSA 决定「怎么执行」</figcaption>
+</figure>
+
+<div class="box key">
+  <div class="t">&#9733; 推荐的推进路线</div>
+  <ol>
+    <li>给<strong>每个</strong> Namespace 至少配上 baseline 策略的 warn 或 audit，开始收集哪些 Pod 不合规、为什么；</li>
+    <li>然后 enforce baseline，同时对 restricted 开启 warn 和 audit；</li>
+    <li>没有任何 Pod 安全配置的 Namespace 就是安全缺口，哪怕只是 warn 和 audit，也要尽快补上。</li>
+  </ol>
+</div>
+
+<h3>动手：PSA 实验</h3>
+
+<p>命令在仓库的 <code>psa</code> 目录下执行。先创建 Namespace 并强制执行 baseline 策略：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl create ns psa-test
+
+$ kubectl label --overwrite ns psa-test \
+  pod-security.kubernetes.io/enforce=baseline
+
+$ kubectl describe ns psa-test
+Name:         psa-test
+Labels:       kubernetes.io/metadata.name=psa-test
+              pod-security.kubernetes.io/enforce=baseline    # 标签已正确应用
+Status:       Active
+</pre>
+</div>
+
+<div class="code" data-lang="yaml" data-file="psa/psa-pod.yml">
+<pre>
+apiVersion: v1
+kind: Pod
+metadata:
+  name: psa-pod
+  namespace: psa-test        # 部署到新的 psa-test Namespace
+spec:
+  containers:
+  - name: psa-ctr
+    image: nginx
+    securityContext:
+      privileged: true       # 违反 baseline 策略
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f psa-pod.yml
+Error from server (Forbidden): error when creating "psa-pod.yml": pods "psa-pod" is
+forbidden: violates PodSecurity "baseline:latest": privileged (container "psa-ctr"
+must not set securityContext.privileged=true)
+</pre>
+</div>
+
+<p>把 <code>privileged</code> 改成 <code>false</code> 再部署，就能通过 baseline：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f psa-pod.yml
+pod/psa-pod created
+</pre>
+</div>
+
+<p>用 <code>--dry-run=server</code> 预演切换到 restricted 的影响（不会真的应用）：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl label --dry-run=server --overwrite ns psa-test \
+  pod-security.kubernetes.io/enforce=restricted
+Warning: existing pods in namespace "psa-test" violate the new PodSecurity enforce
+level "restricted:latest"
+Warning: psa-pod: allowPrivilegeEscalation != false, unrestricted capabilities,
+runAsNonRoot != true, seccompProfile
+</pre>
+</div>
+
+<p>psa-pod 有四项不满足 restricted：<code>allowPrivilegeEscalation</code> 没设为 false；capabilities 不受限；<code>runAsNonRoot</code> 没设为 true；没有通过 <code>seccompProfile</code> 检查。真的应用后看看已在运行的 Pod：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl label --overwrite ns psa-test \
+  pod-security.kubernetes.io/enforce=restricted
+Warning: existing pods in namespace "psa-test" violate the new PodSecurity enforce level
+"restricted:latest"
+namespace/psa-test labeled
+
+$ kubectl get pods --namespace psa-test
+NAME      READY   STATUS    RESTARTS   AGE
+psa-pod   1/1     Running   0          3m9s
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 已有 Pod 不受影响</div>
+  <p>PSA 是验证型准入控制器，只作用于 Pod 的创建和修改，不能修改 Pod，也不会终止已经在运行的 Pod。</p>
+</div>
+
+<p>一个 Namespace 可以同时配置多个策略和模式，这也是常见做法——强制 baseline，同时对 restricted 做警告和审计，为升级做准备：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl label --overwrite ns psa-test \
+  pod-security.kubernetes.io/enforce=baseline \
+  pod-security.kubernetes.io/warn=restricted \
+  pod-security.kubernetes.io/audit=restricted
+</pre>
+</div>
+
+<h3>PSA 的替代方案</h3>
+<p>PSS 和 PSA 有局限：只是验证型准入控制器，不能修改、导入或自建策略。需要更多能力时，可以考虑第三方方案：<strong>OPA Gatekeeper</strong>、<strong>Kubewarden</strong>、<strong>Kyverno</strong> 等。</p>
+
+<h2 id="journey">走向更安全的 Kubernetes</h2>
+
+<div class="cards">
+  <div class="card"><span class="ic">&#9997;</span><h4>v1.26：签名制品</h4><p>构建集群用的所有二进制和容器镜像都经过加密签名。</p></div>
+  <div class="card"><span class="ic">&#128227;</span><h4>v1.27：CVE 订阅源</h4><p>官方维护所有公开漏洞的 JSON 和 RSS 订阅源，新 CVE 公布时自动刷新。</p></div>
+  <div class="card"><span class="ic">&#128737;</span><h4>v1.27：默认 seccomp</h4><p>所有容器继承运行时的默认 seccomp 配置（需要每个 kubelet 开启 <code>--seccomp-default</code>）。</p></div>
+  <div class="card"><span class="ic">&#128274;</span><h4>机密计算</h4><p>机密虚拟机、机密容器为使用中的数据提供内存加密，有的云在托管 K8s 中已提供。</p></div>
+  <div class="card"><span class="ic">&#128269;</span><h4>第三方安全审计</h4><p>2023 年 4 月发布基于 1.24 的第二份审计报告（首份在 2019 年），是识别威胁和缓解措施的好资料。</p></div>
+  <div class="card"><span class="ic">&#128214;</span><h4>云原生安全白皮书</h4><p>CNCF 发布，帮你建立对云原生安全的整体视角。</p></div>
+</div>
+
+<h2 id="cleanup">清理</h2>
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl delete ns psa-test
+namespace "psa-test" deleted
+</pre>
+</div>
+
+<h2 id="summary">小结</h2>
+<ul>
+  <li>STRIDE 把威胁分为仿冒、篡改、抵赖、信息泄露、拒绝服务、权限提升六类，是给 Kubernetes 做威胁建模的结构化方法。</li>
+  <li>一种威胁常常引出另一种，而一种威胁也有多种缓解手段——<strong>纵深防御</strong>是关键策略。</li>
+  <li>Pod 安全的常用手段：非 root、丢弃 capabilities、seccomp、AppArmor/SELinux、禁止提权、只读文件系统。</li>
+  <li>Pod Security Admission 是实施 Pod 安全默认值的首选方式。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>挑一个你正在运行的应用，按 STRIDE 六类各写出一条它可能面临的威胁和一条缓解措施。</li>
+    <li>修改 <code>psa-pod.yml</code>，补全 restricted 要求的四项设置（<code>allowPrivilegeEscalation: false</code>、<code>capabilities.drop: ["ALL"]</code>、<code>runAsNonRoot: true</code>、<code>seccompProfile.type: RuntimeDefault</code>），让它能在 enforce=restricted 的 Namespace 里成功创建。（提示：nginx 官方镜像默认以 root 运行，可以换成 <code>nginxinc/nginx-unprivileged</code>。）</li>
+    <li>运行 <code>kubectl get ns --show-labels</code>，检查你集群里哪些 Namespace 还没有任何 <code>pod-security</code> 标签。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

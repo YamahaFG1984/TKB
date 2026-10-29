@@ -1,0 +1,764 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 11 章 · ConfigMap 与 Secret — Kubernetes 入门实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="11">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 11 章</span>
+<h1>ConfigMap 与 Secret：把配置从镜像里拿出来</h1>
+<p class="lede">
+  大多数业务应用由两部分组成：<strong>应用本身</strong>和<strong>配置</strong>。NGINX、Apache 这类 Web 服务器不加配置几乎没用。
+  过去我们把应用和配置打包在一起，但这是一个<em>反模式</em>（看起来是好主意、实际是坏主意）。
+  这一章讲 Kubernetes 如何用 ConfigMap 和 Secret 把二者解耦，并在运行时再组合起来。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>理解应用与配置解耦的好处：复用、更易开发测试、变更更简单、干扰更小</li>
+    <li>掌握 ConfigMap 的结构，以及命令式 / 声明式两种创建方式</li>
+    <li>掌握三种注入方式：<strong>环境变量、启动命令参数、卷</strong>，知道哪种能接收更新</li>
+    <li>理解 Secret 的真实安全性：<strong>base64 不是加密</strong></li>
+    <li>用 Secret 卷把敏感数据挂载进容器</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="big-picture">为什么要解耦</h2>
+
+<p>假设公司有开发（dev）、测试（test）、生产（prod）三套环境，每套都有自己的网络、安全策略、凭据和证书。</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="应用和配置耦合与解耦的对比">
+  <rect class="bx-r" x="20" y="14" width="350" height="262" rx="14"/>
+  <text class="ttl on-r" x="195" y="40" text-anchor="middle">耦合：配置打进镜像</text>
+  <rect class="bx" x="40" y="58" width="94" height="70" rx="8"/><text class="sm" x="87" y="84" text-anchor="middle">镜像</text><text class="sm" x="87" y="102" text-anchor="middle">应用+dev配置</text>
+  <rect class="bx" x="148" y="58" width="94" height="70" rx="8"/><text class="sm" x="195" y="84" text-anchor="middle">镜像</text><text class="sm" x="195" y="102" text-anchor="middle">应用+test配置</text>
+  <rect class="bx" x="256" y="58" width="94" height="70" rx="8"/><text class="sm" x="303" y="84" text-anchor="middle">镜像</text><text class="sm" x="303" y="102" text-anchor="middle">应用+prod配置</text>
+  <text class="sm" x="40" y="158">✗ 每个应用要构建 3 个镜像</text>
+  <text class="sm" x="40" y="180">✗ 存在 3 个不同的仓库里</text>
+  <text class="sm" x="40" y="202">✗ 改个错别字也要构建、测试、存储、</text>
+  <text class="sm" x="40" y="220">　 部署三遍</text>
+  <text class="sm" x="40" y="246">✗ 每次更新都混着代码和配置，难排查</text>
+
+  <rect class="bx-g" x="390" y="14" width="350" height="262" rx="14"/>
+  <text class="ttl on-g" x="565" y="40" text-anchor="middle">解耦：运行时注入配置</text>
+  <rect class="bx-a" x="490" y="56" width="150" height="44" rx="8"/>
+  <text class="sm on-a" x="565" y="76" text-anchor="middle">一个加固的 NGINX 镜像</text>
+  <text class="sm" x="565" y="92" text-anchor="middle">不含任何配置</text>
+  <rect class="bx-b" x="410" y="134" width="96" height="40" rx="8"/><text class="sm" x="458" y="159" text-anchor="middle">dev 配置</text>
+  <rect class="bx-b" x="517" y="134" width="96" height="40" rx="8"/><text class="sm" x="565" y="159" text-anchor="middle">test 配置</text>
+  <rect class="bx-b" x="624" y="134" width="96" height="40" rx="8"/><text class="sm" x="672" y="159" text-anchor="middle">prod 配置</text>
+  <path class="ln" d="M530 102 L470 130"/><path class="ln" d="M565 102 V130"/><path class="ln" d="M600 102 L660 130"/>
+  <text class="sm" x="410" y="202">✓ 一个镜像、一个仓库，各环境同一版本</text>
+  <text class="sm" x="410" y="224">✓ 镜像不含敏感数据，可以开放给所有开发者</text>
+  <text class="sm" x="410" y="246">✓ 改配置无需重建镜像、无需替换所有容器</text>
+  <text class="sm" x="410" y="268">✓ 其他团队可用同一镜像 + 自己的配置</text>
+</svg>
+<figcaption>图 11-1　一个镜像 + 多份配置，在运行时组合</figcaption>
+</figure>
+
+<h2 id="configmap">ConfigMap 的原理</h2>
+
+<p>
+  <strong>ConfigMap（CM）</strong>是一种 API 资源，用于在 Pod 之外保存配置数据，并在运行时注入进去。它是核心 API 组里的 <code>v1</code> 一等对象，这说明：
+  它很稳定、存在已久、可以用 YAML 定义部署、可以用 kubectl 管理。
+</p>
+
+<div class="vs">
+  <div class="new">
+    <div class="h">✓ 适合放进 ConfigMap</div>
+    <div style="padding:6px 16px 10px;font-size:14.5px">
+      <ul>
+        <li>环境变量</li>
+        <li>Web 服务器、数据库的配置文件</li>
+        <li>主机名、Service 名与端口</li>
+        <li>账户名</li>
+      </ul>
+    </div>
+  </div>
+  <div class="old">
+    <div class="h">✗ 不要放进 ConfigMap</div>
+    <div style="padding:6px 16px 10px;font-size:14.5px">
+      <ul>
+        <li>证书</li>
+        <li>密码</li>
+        <li>任何敏感数据</li>
+      </ul>
+      <p style="margin:6px 0 0">Kubernetes 完全不保护 ConfigMap 的内容。敏感数据用 Secret，并纳入完整的密钥管理方案。</p>
+    </div>
+  </div>
+</div>
+
+<h3>ConfigMap 就是一张键值表</h3>
+<ul>
+  <li><strong>键</strong>：任意名字，可含字母数字、短横线、点和下划线；</li>
+  <li><strong>值</strong>：可以是任何东西，包括带多行和换行的完整配置文件；</li>
+  <li>大小上限 <strong>1MiB</strong>（1,048,576 字节）。</li>
+</ul>
+
+<div class="vs">
+  <div class="new">
+    <div class="h">三个简单条目</div>
+    <div class="code" data-lang="yaml">
+<pre>
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: epl
+data:                        # 3 个键值对
+  Competition: Premier League
+  Season: 2024-2025
+  Champions: Liverpool
+</pre>
+    </div>
+  </div>
+  <div class="new">
+    <div class="h">值是一个完整的配置文件</div>
+    <div class="code" data-lang="yaml">
+<pre>
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: cm2
+data:
+  test.conf: |               # 键
+    env = plex-test          # ┐
+    endpoint = 0.0.0.0:31001 # │ 值
+    char = utf8              # │
+    vault = PLEX/test        # │
+    log-size = 512M          # ┘
+</pre>
+    </div>
+  </div>
+</div>
+
+<h3>三种注入方式</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 260" role="img" aria-label="ConfigMap 通过环境变量、启动命令参数、卷三种方式注入容器">
+  <rect class="bx-a" x="20" y="90" width="170" height="80" rx="12"/>
+  <text class="ttl on-a" x="105" y="118" text-anchor="middle">ConfigMap</text>
+  <text class="sm" x="105" y="140" text-anchor="middle">存在于应用之外</text>
+  <text class="sm" x="105" y="158" text-anchor="middle">键值对</text>
+
+  <rect class="bx-b" x="270" y="20" width="200" height="56" rx="10"/>
+  <text class="ttl on-b" x="370" y="44" text-anchor="middle">① 环境变量</text>
+  <text class="sm" x="370" y="64" text-anchor="middle">创建时注入，之后不更新</text>
+  <rect class="bx-p" x="270" y="102" width="200" height="56" rx="10"/>
+  <text class="ttl on-p" x="370" y="126" text-anchor="middle">② 启动命令参数</text>
+  <text class="sm" x="370" y="146" text-anchor="middle">本质也是环境变量，不更新</text>
+  <rect class="bx-g" x="270" y="184" width="200" height="56" rx="10"/>
+  <text class="ttl on-g" x="370" y="208" text-anchor="middle">③ 卷中的文件</text>
+  <text class="sm" x="370" y="228" text-anchor="middle">最灵活，<tspan class="on-g">会自动推送更新</tspan></text>
+
+  <rect class="bx" x="550" y="60" width="190" height="140" rx="12"/>
+  <text class="ttl" x="645" y="86" text-anchor="middle">容器里的应用</text>
+  <text class="sm" x="645" y="116" text-anchor="middle">看到的只是普通的</text>
+  <text class="sm" x="645" y="136" text-anchor="middle">环境变量和文件</text>
+  <text class="sm" x="645" y="166" text-anchor="middle">完全不需要知道</text>
+  <text class="sm" x="645" y="184" text-anchor="middle">ConfigMap 的存在</text>
+
+  <path class="ln-a" d="M192 118 L266 48" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M192 130 H266" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M192 142 L266 212" marker-end="url(#ar-a)"/>
+  <path class="ln" d="M472 48 L546 100" marker-end="url(#ar)"/>
+  <path class="ln" d="M472 130 H546" marker-end="url(#ar)"/>
+  <path class="ln" d="M472 212 L546 160" marker-end="url(#ar)"/>
+</svg>
+<figcaption>图 11-2　三种方式都不需要改造现有应用</figcaption>
+</figure>
+
+<div class="box deep">
+  <div class="t">&#128302; Kubernetes 原生应用</div>
+  <p>
+    知道自己跑在 Kubernetes 上、能直接和 API 服务器对话的应用，可以直接通过 API 读取 ConfigMap，还能实时看到更新。
+    但这样的应用只能在 Kubernetes 上跑，会造成锁定。本章示例都用环境变量和卷，让现有应用无需改写就能使用。
+  </p>
+</div>
+
+<h2 id="create">动手：创建 ConfigMap</h2>
+
+<p>以下命令在仓库的 <code>configmaps</code> 目录执行。<code>configmap</code> 可简写为 <code>cm</code>。</p>
+
+<h3>命令式</h3>
+<p><code>kubectl create configmap</code> 接受两种数据来源：命令行字面量（<code>--from-literal</code>）和文件（<code>--from-file</code>）。</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl create configmap testmap1 \
+  --from-literal shortname=SAFC \
+  --from-literal longname="Sunderland Association Football Club"
+
+$ kubectl describe cm testmap1
+Name:         testmap1
+Namespace:    default
+Data
+====
+shortname:
+----
+SAFC
+longname:
+----
+Sunderland Association Football Club
+
+$ kubectl create cm testmap2 --from-file cmfile.txt
+configmap/testmap2 created
+
+$ kubectl describe cm testmap2
+Data
+====
+cmfile.txt:          # ← 键 = 文件名
+----
+Kubernetes FTW!      # ← 值 = 文件内容
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl get cm testmap2 -o yaml
+apiVersion: v1
+data:
+  cmfile.txt: |
+    Kubernetes FTW!
+kind: ConfigMap
+metadata:
+  name: testmap2
+  namespace: default
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 没有 spec 和 status</div>
+  <p>ConfigMap 没有「期望状态 vs 观测状态」的概念，所以没有 <code>spec</code> 和 <code>status</code>，取而代之的是 <code>data</code>。它只是一个打扮成 Kubernetes 对象的键值表。</p>
+</div>
+
+<h3>声明式</h3>
+
+<div class="vs">
+  <div class="new">
+    <div class="h">fullname.yml：两个条目</div>
+    <div class="code" data-lang="yaml" data-file="configmaps/fullname.yml">
+<pre>
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: multimap
+data:
+  firstname: Nigel
+  lastname: Poulton
+</pre>
+    </div>
+  </div>
+  <div class="new">
+    <div class="h">singlemap.yml：一个条目，值是整个文件</div>
+    <div class="code" data-lang="yaml" data-file="configmaps/singlemap.yml">
+<pre>
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: test-config
+data:
+  test.conf: |
+    env = plex-test
+    endpoint = 0.0.0.0:31001
+    char = utf8
+    vault = PLEX/test
+    log-size = 512M
+</pre>
+    </div>
+  </div>
+</div>
+
+<p>键后面的竖线 <code>|</code> 告诉 Kubernetes：把后面缩进的所有内容当成<strong>一个</strong>值。</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f fullname.yml
+configmap/multimap created
+$ kubectl apply -f singlemap.yml
+configmap/test-config created
+</pre>
+</div>
+
+<h2 id="env">注入方式 ①：环境变量</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 180" role="img" aria-label="ConfigMap 条目映射为容器环境变量">
+  <rect class="bx-a" x="20" y="30" width="200" height="110" rx="12"/>
+  <text class="ttl on-a" x="120" y="56" text-anchor="middle">ConfigMap multimap</text>
+  <text class="mono sm" x="40" y="88">firstname: Nigel</text>
+  <text class="mono sm" x="40" y="114">lastname: Poulton</text>
+
+  <rect class="bx-p" x="280" y="30" width="200" height="110" rx="12"/>
+  <text class="ttl on-p" x="380" y="56" text-anchor="middle">Pod 模板 env</text>
+  <text class="mono sm" x="300" y="88">FIRSTNAME ← firstname</text>
+  <text class="mono sm" x="300" y="114">LASTNAME  ← lastname</text>
+
+  <rect class="bx-g" x="540" y="30" width="200" height="110" rx="12"/>
+  <text class="ttl on-g" x="640" y="56" text-anchor="middle">容器</text>
+  <text class="mono sm" x="560" y="88">$FIRSTNAME=Nigel</text>
+  <text class="mono sm" x="560" y="114">$LASTNAME=Poulton</text>
+  <path class="ln" d="M222 85 H276" marker-end="url(#ar)"/>
+  <path class="ln" d="M482 85 H536" marker-end="url(#ar)"/>
+  <text class="sm on-r" x="380" y="168" text-anchor="middle">容器启动时一次性注入；之后修改 ConfigMap，已有容器看不到</text>
+</svg>
+<figcaption>图 11-3　ConfigMap → 环境变量</figcaption>
+</figure>
+
+<div class="code" data-lang="yaml" data-file="configmaps/podenv.yml">
+<pre>
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    chapter: configmaps
+  name: envpod
+spec:
+  containers:
+    - name: ctr1
+      image: busybox
+      command: ["sleep"]
+      args: ["infinity"]
+      env:
+        - name: FIRSTNAME            # 名为 FIRSTNAME 的环境变量
+          valueFrom:                 # 取值来自
+            configMapKeyRef:         # 一个 ConfigMap
+              name: multimap         # 名叫 multimap
+              key: firstname         # 中 firstname 字段的值
+        - name: LASTNAME
+          valueFrom:
+            configMapKeyRef:
+              name: multimap
+              key: lastname
+</pre>
+</div>
+
+<p>环境变量名用大写只是为了和 ConfigMap 里的键区分开，实际可以随便起。</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f podenv.yml
+pod/envpod created
+
+$ kubectl exec envpod -- env | grep NAME
+HOSTNAME=envpod
+FIRSTNAME=Nigel
+LASTNAME=Poulton
+</pre>
+</div>
+
+<p>Windows 用户把 <code>grep NAME</code> 换成 <code>Select-String -Pattern 'NAME'</code>。</p>
+
+<h2 id="args">注入方式 ②：启动命令参数</h2>
+
+<p>在 Pod 模板里写好容器的启动命令，把环境变量当参数传进去：</p>
+
+<div class="code" data-lang="yaml" data-file="configmaps/podstartup.yml">
+<pre>
+apiVersion: v1
+kind: Pod
+metadata:
+  name: startup-pod
+  labels:
+    chapter: configmaps
+spec:
+  restartPolicy: OnFailure
+  containers:
+    - name: args1
+      image: busybox
+      command: [ "/bin/sh", "-c", "echo First name $(FIRSTNAME) last name $(LASTNAME)", "wait" ]
+      env:                           # 和上例相同的环境变量映射，
+        - name: FIRSTNAME            # 只是这次被上面的启动命令引用
+          valueFrom:
+            configMapKeyRef:
+              name: multimap
+              key: firstname
+        - name: LASTNAME
+          valueFrom:
+            configMapKeyRef:
+              name: multimap
+              key: lastname
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 150" role="img" aria-label="ConfigMap 条目经环境变量进入启动命令">
+  <rect class="bx-a" x="20" y="40" width="150" height="60" rx="10"/>
+  <text class="mono sm" x="95" y="66" text-anchor="middle">firstname: Nigel</text>
+  <text class="sm" x="95" y="86" text-anchor="middle">ConfigMap</text>
+  <rect class="bx-p" x="210" y="40" width="150" height="60" rx="10"/>
+  <text class="mono sm" x="285" y="66" text-anchor="middle">FIRSTNAME=Nigel</text>
+  <text class="sm" x="285" y="86" text-anchor="middle">环境变量</text>
+  <rect class="bx-b" x="400" y="40" width="340" height="60" rx="10"/>
+  <text class="mono sm" x="570" y="66" text-anchor="middle">echo First name $(FIRSTNAME) …</text>
+  <text class="sm" x="570" y="86" text-anchor="middle">启动命令里用 $(变量名) 引用</text>
+  <path class="ln" d="M172 70 H206" marker-end="url(#ar)"/>
+  <path class="ln" d="M362 70 H396" marker-end="url(#ar)"/>
+  <text class="mono sm on-g" x="380" y="134" text-anchor="middle">输出：First name Nigel last name Poulton</text>
+</svg>
+<figcaption>图 11-4　ConfigMap → 环境变量 → 启动命令</figcaption>
+</figure>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f podstartup.yml
+pod/startup-pod created
+
+$ kubectl logs startup-pod -c args1
+First name Nigel last name Poulton
+
+$ kubectl describe pod startup-pod
+...
+    Environment:
+      FIRSTNAME:  &lt;set to the key 'firstname' of config map 'multimap'&gt;  Optional: false
+      LASTNAME:   &lt;set to the key 'lastname' of config map 'multimap'&gt;   Optional: false
+
+$ kubectl delete pod startup-pod     # 它打印完就结束了（Completed）
+</pre>
+</div>
+
+<p>这种方式本质上还是环境变量，所以有同样的局限：ConfigMap 的更新不会推送到已有的变量。</p>
+
+<h2 id="volume">注入方式 ③：卷（推荐）</h2>
+
+<p>卷是最灵活的方式：可以引用完整的配置文件，而且<strong>能收到更新</strong>（可能要等一两分钟才出现在容器里）。步骤：</p>
+
+<ol class="steps">
+  <li>创建 ConfigMap</li>
+  <li>在 Pod 模板里定义一个 ConfigMap 卷</li>
+  <li>把这个卷挂载进容器</li>
+  <li>ConfigMap 的每个条目都会以<strong>文件</strong>形式出现在容器里</li>
+</ol>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="ConfigMap 条目通过卷变成容器内的文件">
+  <rect class="bx-a" x="20" y="40" width="190" height="110" rx="12"/>
+  <text class="ttl on-a" x="115" y="66" text-anchor="middle">ConfigMap multimap</text>
+  <text class="mono sm" x="40" y="98">firstname: Nigel</text>
+  <text class="mono sm" x="40" y="122">lastname: Poulton</text>
+
+  <rect class="bx-p" x="260" y="60" width="160" height="70" rx="12"/>
+  <text class="ttl on-p" x="340" y="88" text-anchor="middle">卷 volmap</text>
+  <text class="sm" x="340" y="110" text-anchor="middle">类型：configMap</text>
+
+  <rect class="bx-g" x="470" y="20" width="270" height="150" rx="12"/>
+  <text class="ttl on-g" x="605" y="46" text-anchor="middle">容器（nginx）</text>
+  <text class="mono sm" x="490" y="76">/etc/name/</text>
+  <rect class="bx" x="510" y="88" width="210" height="28" rx="6"/><text class="mono sm" x="520" y="107">firstname  → "Nigel"</text>
+  <rect class="bx" x="510" y="124" width="210" height="28" rx="6"/><text class="mono sm" x="520" y="143">lastname   → "Poulton"</text>
+
+  <path class="ln" d="M212 95 H256" marker-end="url(#ar)"/>
+  <path class="ln" d="M422 95 H466" marker-end="url(#ar)"/>
+  <text class="sm" x="445" y="88" text-anchor="middle">挂载</text>
+  <path class="ln-g" d="M115 152 C115 196 605 196 605 174" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="360" y="200" text-anchor="middle">修改 ConfigMap → 约一分钟后文件自动更新</text>
+</svg>
+<figcaption>图 11-5　ConfigMap 卷：每个键成为一个文件</figcaption>
+</figure>
+
+<div class="code" data-lang="yaml" data-file="configmaps/podvol.yml">
+<pre>
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cmvol
+spec:
+  volumes:
+    - name: volmap             # 创建名为 volmap 的卷
+      configMap:               # 基于 ConfigMap
+        name: multimap         # 名叫 multimap
+  containers:
+    - name: ctr
+      image: nginx
+      volumeMounts:
+        - name: volmap         # 把 volmap 卷
+          mountPath: /etc/name # 挂载到容器的 /etc/name
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f podvol.yml
+pod/cmvol created
+
+$ kubectl exec cmvol -- ls /etc/name
+firstname
+lastname
+</pre>
+</div>
+
+<p>现在证明更新会推送到运行中的容器。用 <code>kubectl edit cm multimap</code> 修改 <code>data</code> 块（不习惯 vi 的话，也可以改 YAML 文件再 <code>kubectl apply</code>）：</p>
+
+<div class="code" data-lang="yaml" data-file="kubectl edit cm multimap">
+<pre>
+apiVersion: v1
+data:
+  City: Macclesfield      # 改了
+  Country: UK             # 改了
+kind: ConfigMap
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+# 等一分钟左右
+$ kubectl exec cmvol -- ls /etc/name
+City
+Country
+
+$ kubectl exec cmvol -- cat /etc/name/Country
+UK
+</pre>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th>方式</th><th>能用完整配置文件吗</th><th>运行中能收到更新吗</th></tr>
+  <tr><td>环境变量</td><td>不方便</td><td>✗</td></tr>
+  <tr><td>启动命令参数</td><td>不方便</td><td>✗</td></tr>
+  <tr><td><strong>卷</strong></td><td>✓</td><td>✓（有一两分钟延迟）</td></tr>
+</table>
+</div>
+
+<h2 id="secrets">Secret</h2>
+
+<p>
+  Secret 和 ConfigMap 的用法一样：保存配置数据，运行时注入容器。区别在于它设计用来存放<strong>敏感数据</strong>——密码、证书、OAuth 令牌——并作为更完整的密钥管理方案的一部分。
+</p>
+
+<h3>Kubernetes Secret 安全吗？</h3>
+<p>简短的回答是：<strong>不安全</strong>。稍长的回答是：一个安全的密钥管理系统远不止 Secret 对象本身，你需要考虑：</p>
+
+<div class="cards">
+  <div class="card"><span class="ic">&#128451;</span><h4>静态加密</h4><p>在集群存储（etcd）里加密存放。</p></div>
+  <div class="card"><span class="ic">&#128225;</span><h4>传输加密</h4><p>在网络上传输时加密。</p></div>
+  <div class="card"><span class="ic">&#128230;</span><h4>节点/容器内保护</h4><p>在节点、Pod、容器中呈现时的保护。</p></div>
+  <div class="card"><span class="ic">&#128273;</span><h4>最小权限 RBAC</h4><p>控制谁能通过 API 访问 Secret。</p></div>
+  <div class="card"><span class="ic">&#128274;</span><h4>etcd 节点访问</h4><p>限制对控制平面和 etcd 节点的访问。</p></div>
+  <div class="card"><span class="ic">&#9888;</span><h4>特权容器</h4><p>防止特权容器读取 Secret。</p></div>
+  <div class="card"><span class="ic">&#128193;</span><h4>代码仓库</h4><p>防止通过 GitHub 等代码仓库泄露。</p></div>
+  <div class="card"><span class="ic">&#128465;</span><h4>安全删除</h4><p>不再使用时安全地删除。</p></div>
+</div>
+
+<p>
+  大多数新集群<strong>一样都没做</strong>：Secret 在 etcd 里明文存储、在网络上明文传输、以明文挂载进容器！
+  不过你可以配置 <code>EncryptionConfiguration</code> 对象来做静态加密，部署服务网格加密所有网络流量，配置严格的 RBAC 等等。
+  在真实环境中，很多生产集群用服务网格保护网络流量，并把密钥存放在 Kubernetes 之外的<strong>第三方保险库</strong>（如 HashiCorp Vault 或云厂商的类似服务）里；Kubernetes 甚至有原生的 <strong>Secrets Store CSI Driver</strong> 来对接外部保险库。
+</p>
+
+<h3>只用 Kubernetes Secret 时的典型流程</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 270" role="img" aria-label="Secret 从创建到被应用使用的七个步骤">
+  <rect class="bx-r" x="20" y="20" width="160" height="70" rx="10"/>
+  <text class="lbl on-r" x="100" y="44" text-anchor="middle">① 创建 Secret</text>
+  <text class="sm" x="100" y="64" text-anchor="middle">存入 etcd</text>
+  <text class="sm on-r" x="100" y="80" text-anchor="middle">（未加密）</text>
+  <rect class="bx" x="210" y="20" width="160" height="70" rx="10"/>
+  <text class="lbl" x="290" y="48" text-anchor="middle">② 调度使用它的 Pod</text>
+  <rect class="bx-r" x="400" y="20" width="160" height="70" rx="10"/>
+  <text class="lbl on-r" x="480" y="44" text-anchor="middle">③ 经网络发给节点</text>
+  <text class="sm on-r" x="480" y="66" text-anchor="middle">（未加密）</text>
+  <rect class="bx" x="590" y="20" width="150" height="70" rx="10"/>
+  <text class="lbl" x="665" y="48" text-anchor="middle">④ kubelet 启动</text>
+  <text class="lbl" x="665" y="68" text-anchor="middle">Pod 和容器</text>
+
+  <rect class="bx-a" x="440" y="130" width="300" height="70" rx="10"/>
+  <text class="lbl on-a" x="590" y="154" text-anchor="middle">⑤ 运行时通过内存中的 tmpfs 挂载</text>
+  <text class="sm" x="590" y="174" text-anchor="middle">并从 base64 解码成明文</text>
+  <rect class="bx-g" x="210" y="130" width="200" height="70" rx="10"/>
+  <text class="lbl on-g" x="310" y="158" text-anchor="middle">⑥ 应用读取使用</text>
+  <rect class="bx" x="20" y="130" width="160" height="70" rx="10"/>
+  <text class="lbl" x="100" y="154" text-anchor="middle">⑦ 删除 Pod</text>
+  <text class="sm" x="100" y="174" text-anchor="middle">节点上的副本被删</text>
+  <text class="sm" x="100" y="190" text-anchor="middle">（etcd 里的还在）</text>
+
+  <path class="ln" d="M182 55 H206" marker-end="url(#ar)"/>
+  <path class="ln" d="M372 55 H396" marker-end="url(#ar)"/>
+  <path class="ln" d="M562 55 H586" marker-end="url(#ar)"/>
+  <path class="ln" d="M665 92 V126" marker-end="url(#ar)"/>
+  <path class="ln" d="M438 165 H414" marker-end="url(#ar)"/>
+  <path class="ln" d="M208 165 H184" marker-end="url(#ar)"/>
+  <text class="sm on-r" x="380" y="240" text-anchor="middle">红色步骤是开箱即用时的薄弱环节，需要你额外加固</text>
+</svg>
+<figcaption>图 11-6　开箱即用的 Secret 生命周期</figcaption>
+</figure>
+
+<p>一个典型用例是 TLS 终止代理：<strong>同一个镜像</strong>，在三个环境里分别加载三个不同的 Secret（各环境自己的 TLS 证书）。</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 190" role="img" aria-label="同一镜像在三个环境中加载不同的 Secret">
+  <rect class="bx-a" x="290" y="14" width="180" height="44" rx="10"/>
+  <text class="ttl on-a" x="380" y="41" text-anchor="middle">TLS 代理镜像（唯一）</text>
+  <rect class="bx" x="40" y="94" width="200" height="80" rx="12"/>
+  <text class="ttl" x="140" y="118" text-anchor="middle">dev 环境</text>
+  <rect class="bx-r" x="70" y="132" width="140" height="30" rx="6"/><text class="sm on-r" x="140" y="152" text-anchor="middle">Secret：dev 证书</text>
+  <rect class="bx" x="280" y="94" width="200" height="80" rx="12"/>
+  <text class="ttl" x="380" y="118" text-anchor="middle">test 环境</text>
+  <rect class="bx-r" x="310" y="132" width="140" height="30" rx="6"/><text class="sm on-r" x="380" y="152" text-anchor="middle">Secret：test 证书</text>
+  <rect class="bx" x="520" y="94" width="200" height="80" rx="12"/>
+  <text class="ttl" x="620" y="118" text-anchor="middle">prod 环境</text>
+  <rect class="bx-r" x="550" y="132" width="140" height="30" rx="6"/><text class="sm on-r" x="620" y="152" text-anchor="middle">Secret：prod 证书</text>
+  <path class="ln" d="M330 60 L170 90" marker-end="url(#ar)"/>
+  <path class="ln" d="M380 60 V90" marker-end="url(#ar)"/>
+  <path class="ln" d="M430 60 L590 90" marker-end="url(#ar)"/>
+</svg>
+<figcaption>图 11-7　运行时注入 Secret</figcaption>
+</figure>
+
+<h2 id="secret-handson">动手：创建和使用 Secret</h2>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl create secret generic creds \
+  --from-literal user=nigelpoulton \
+  --from-literal pwd=Password123
+
+$ kubectl get secret creds -o yaml
+apiVersion: v1
+kind: Secret
+data:
+  pwd: UGFzc3dvcmQxMjM=
+  user: bmlnZWxwb3VsdG9u
+
+$ echo UGFzc3dvcmQxMjM= | base64 -d
+Password123
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 150" role="img" aria-label="base64 编码可以不用密钥直接解码">
+  <rect class="bx" x="20" y="40" width="180" height="56" rx="10"/>
+  <text class="mono ttl" x="110" y="74" text-anchor="middle">Password123</text>
+  <rect class="bx-a" x="290" y="40" width="200" height="56" rx="10"/>
+  <text class="mono ttl on-a" x="390" y="74" text-anchor="middle">UGFzc3dvcmQxMjM=</text>
+  <rect class="bx-r" x="580" y="40" width="160" height="56" rx="10"/>
+  <text class="mono ttl on-r" x="660" y="74" text-anchor="middle">Password123</text>
+  <path class="ln" d="M202 68 H286" marker-end="url(#ar)"/>
+  <text class="sm" x="244" y="60" text-anchor="middle">编码</text>
+  <path class="ln-r" d="M492 68 H576" marker-end="url(#ar-r)"/>
+  <text class="sm on-r" x="534" y="60" text-anchor="middle">谁都能解码</text>
+  <text class="sm" x="380" y="130" text-anchor="middle">base64 只是「换个写法」，不需要任何密钥 —— 它是编码，不是加密</text>
+</svg>
+<figcaption>图 11-8　永远不要把 Secret 的 YAML 提交到 GitHub</figcaption>
+</figure>
+
+<p>声明式创建（把 <code>data</code> 改成 <code>stringData</code> 就可以直接写明文条目，但同样不能放到 GitHub 上）：</p>
+
+<div class="code" data-lang="yaml" data-file="configmaps/tkb-secret.yml">
+<pre>
+apiVersion: v1
+kind: Secret
+metadata:
+  name: tkb-secret
+  labels:
+    chapter: configmaps
+type: Opaque
+data:                          # 改成 stringData 可写明文
+  username: bmlnZWxwb3VsdG9u
+  password: UGFzc3dvcmQxMjM=
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f tkb-secret.yml
+secret/tkb-secret created
+</pre>
+</div>
+
+<h3>在 Pod 中通过卷使用 Secret</h3>
+<p>Secret 同样支持环境变量、命令参数和卷三种方式，最灵活的依然是卷：</p>
+
+<div class="code" data-lang="yaml" data-file="configmaps/secretpod.yml">
+<pre>
+apiVersion: v1
+kind: Pod
+metadata:
+  name: secret-pod
+  labels:
+    topic: secrets
+spec:
+  volumes:
+  - name: secret-vol             # 卷名
+    secret:                      # 卷类型
+      secretName: tkb-secret     # 用这个 Secret 填充卷
+  containers:
+  - name: secret-ctr
+    image: nginx
+    volumeMounts:
+    - name: secret-vol           # 挂载上面定义的卷
+      mountPath: "/etc/tkb"      # 到这个路径
+      readOnly: true
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f secretpod.yml
+pod/secret-pod created
+
+$ kubectl exec secret-pod -- ls /etc/tkb
+password
+username
+
+$ kubectl exec secret-pod -- cat /etc/tkb/password
+Password123
+</pre>
+</div>
+
+<p>
+  部署 Pod 时，Kubernetes 把未加密的 Secret 通过网络发给节点上的 kubelet，运行时再用 tmpfs 挂载进容器。Secret 卷会被自动以<strong>只读</strong>方式挂载，防止应用意外修改。
+  文件内容是明文，方便应用直接使用。因为用的是卷，更新 Secret 后应用也能看到。
+</p>
+
+<h2 id="cleanup">清理</h2>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl get cm
+NAME               DATA   AGE
+kube-root-ca.crt   1      71m      # ← 系统的，不要删
+multimap           2      19m
+test-config        1      17m
+testmap1           2      24m
+testmap2           1      22m
+
+$ kubectl delete pods cmvol envpod secret-pod
+$ kubectl delete cm multimap test-config testmap1 testmap2
+$ kubectl delete secrets creds tkb-secret
+</pre>
+</div>
+
+<h2 id="summary">小结</h2>
+<ul>
+  <li>ConfigMap 和 Secret 用于把应用和配置数据解耦，都是 API 一等对象，可以命令式或声明式创建，用 kubectl 查看。</li>
+  <li>ConfigMap 存放应用配置参数甚至整个配置文件；Secret 存放敏感数据，应作为更完整密钥管理方案的一部分。</li>
+  <li>两者都可以通过环境变量、启动命令、卷注入容器；<strong>卷是首选</strong>，因为它会把变更推送到运行中的容器。</li>
+  <li>Kubernetes 默认<strong>不会</strong>加密 etcd 中的 Secret，也不会加密传输中的 Secret；base64 只是编码。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>用 <code>kubectl create cm nginx-conf --from-file=default.conf</code> 把一个 NGINX 配置文件做成 ConfigMap，挂载到 nginx 容器的 <code>/etc/nginx/conf.d</code>，让它返回一段自定义文本。</li>
+    <li>修改 <code>multimap</code> 后，对比 <code>envpod</code>（环境变量）和 <code>cmvol</code>（卷）里看到的值有什么不同。</li>
+    <li>用 <code>stringData</code> 重写 <code>tkb-secret.yml</code>，apply 后再 <code>kubectl get secret -o yaml</code>，看看存进去的是什么形式。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>
