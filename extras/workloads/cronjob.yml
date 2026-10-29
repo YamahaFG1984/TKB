@@ -1,0 +1,22 @@
+# Runs every minute. Each run creates a Job, which creates a Pod.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: hello-cron
+spec:
+  schedule: "*/1 * * * *"
+  timeZone: "Etc/UTC"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 30
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+          - name: hello
+            image: busybox:1.36
+            command: ["sh", "-c", "date; echo hello from a CronJob"]

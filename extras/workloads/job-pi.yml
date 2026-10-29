@@ -1,0 +1,16 @@
+# A Job that runs once to completion: compute pi to 2000 digits.
+# Based on the example in the official Kubernetes documentation.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pi
+spec:
+  backoffLimit: 4
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: pi
+        image: perl:5.34
+        command: ["perl", "-Mbignum=bpi", "-wle", "print bpi(2000)"]

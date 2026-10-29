@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>附录 · 术语表与下一步 — Kubernetes 入门实战</title>
+<title>第 19 章 · 从源码到上线 — Kubernetes 入门实战</title>
 <link rel="stylesheet" href="assets/style.css">
 </head>
 <body data-chapter="19">
@@ -11,279 +11,642 @@
 <aside id="sidebar"></aside>
 <main>
 
-<span class="chapter-eyebrow">附录</span>
-<h1>术语表、速查与下一步</h1>
+<span class="chapter-eyebrow">第 19 章 · 补充篇</span>
+<h1>从源码到上线</h1>
 <p class="lede">
-  恭喜你读完了全部内容！这一页把散落在各章的知识收拢起来：一张全书概念地图、一份 kubectl 速查表、一份术语表，以及继续学习的路线。
-  建议收藏，遇到想不起来的词就回来翻一翻。
+  前面的章节一直在用作者做好的镜像（<code>nigelpoulton/k8sbook:1.0</code>）。这一章换成你自己来：
+  拿仓库里的示例 Web 应用，<strong>写 Dockerfile → 构建镜像 → 推送到镜像仓库 → 部署到集群 → 改代码再滚动更新</strong>，
+  把一个应用从源代码一路送上 Kubernetes。
 </p>
+
+<div class="box note">
+  <div class="t">&#9432; 关于补充篇</div>
+  <p>
+    本章不是原书内容。用到的应用源码来自仓库的 <code>web-app/1.0/</code>，为了让你可以随意修改，复制了一份到
+    <code>extras/source-to-k8s/app/</code>，并配了一个改进版的 Dockerfile；部署文件是 <code>extras/source-to-k8s/deploy.yml</code>。
+  </p>
+</div>
+
+<!-- TODO(verify): 本章命令输出尚未在真实集群上验证，验证后删除下面的提示框 -->
+<div class="box warn">
+  <div class="t">&#9888; 待验证：本章命令输出尚未在真实集群上运行核对</div>
+  <p>
+    本章的示例文件已通过语法校验，但文中展示的命令输出是按 Docker 和 Kubernetes 的标准格式整理的，<strong>还没有逐条实际运行核对</strong>。
+    如果你实际看到的输出与文中不同，以你的环境为准。
+  </p>
+</div>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>读懂一个 Dockerfile，知道每条指令如何变成镜像的一层</li>
+    <li>写出更适合 Kubernetes 的 Dockerfile：固定版本、利用缓存、非 root、正确处理退出信号</li>
+    <li>理解镜像名的组成，构建、本地测试并推送镜像到 Docker Hub</li>
+    <li>用自己的镜像部署 Deployment + Service，并完成一次「改代码 → 新版本 → 滚动更新 → 回滚」</li>
+    <li>知道私有镜像仓库、CPU 架构不匹配等真实环境中的坑</li>
+  </ul>
+</div>
 
 <div id="chapter-toc"></div>
 
-<h2 id="map">一张图串起全书</h2>
+<h2 id="big-picture">全流程一览</h2>
 
 <figure>
-<svg class="dgm" viewBox="0 0 760 470" role="img" aria-label="Kubernetes 主要对象之间的关系总览">
-  <!-- 外部流量 -->
-  <rect class="bx" x="20" y="20" width="110" height="46" rx="10"/>
-  <text class="lbl" x="75" y="48" text-anchor="middle">用户 / 浏览器</text>
-  <rect class="bx-a" x="170" y="14" width="180" height="58" rx="10"/>
-  <text class="ttl on-a" x="260" y="38" text-anchor="middle">Gateway + HTTPRoute</text>
-  <text class="sm" x="260" y="58" text-anchor="middle">第 8 章 · 外部流量入口</text>
-  <path class="ln" d="M132 43 H166" marker-end="url(#ar)"/>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="从源码到 Kubernetes 的完整流程">
+  <rect class="bx" x="20" y="20" width="130" height="70" rx="12"/>
+  <text class="ttl" x="85" y="46" text-anchor="middle">① 源码</text>
+  <text class="sm" x="85" y="66" text-anchor="middle">app.js + 依赖</text>
+  <text class="sm" x="85" y="82" text-anchor="middle">+ Dockerfile</text>
+  <rect class="bx-b" x="200" y="20" width="130" height="70" rx="12"/>
+  <text class="ttl on-b" x="265" y="46" text-anchor="middle">② 镜像</text>
+  <text class="mono sm" x="265" y="66" text-anchor="middle">docker build</text>
+  <text class="sm" x="265" y="82" text-anchor="middle">在本机生成</text>
+  <rect class="bx-p" x="380" y="20" width="150" height="70" rx="12"/>
+  <text class="ttl on-p" x="455" y="46" text-anchor="middle">③ 镜像仓库</text>
+  <text class="mono sm" x="455" y="66" text-anchor="middle">docker push</text>
+  <text class="sm" x="455" y="82" text-anchor="middle">Docker Hub 等</text>
+  <rect class="bx-a" x="580" y="20" width="160" height="70" rx="12"/>
+  <text class="ttl on-a" x="660" y="46" text-anchor="middle">④ 声明部署</text>
+  <text class="mono sm" x="660" y="66" text-anchor="middle">kubectl apply</text>
+  <text class="sm" x="660" y="82" text-anchor="middle">Deployment + Service</text>
+  <path class="ln" d="M152 55 H196" marker-end="url(#ar)"/>
+  <path class="ln" d="M332 55 H376" marker-end="url(#ar)"/>
+  <path class="ln" d="M532 55 H576" marker-end="url(#ar)"/>
 
-  <!-- kubectl / API -->
-  <rect class="bx" x="420" y="20" width="110" height="46" rx="10"/>
-  <text class="lbl" x="475" y="48" text-anchor="middle">kubectl</text>
-  <rect class="bx-b" x="570" y="14" width="170" height="58" rx="10"/>
-  <text class="ttl on-b" x="655" y="38" text-anchor="middle">API 服务器</text>
-  <text class="sm" x="655" y="58" text-anchor="middle">第 13、14 章 · RBAC · CRD</text>
-  <path class="ln" d="M532 43 H566" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="380" y="140" width="360" height="80" rx="12"/>
+  <text class="ttl on-g" x="560" y="164" text-anchor="middle">⑤ 集群</text>
+  <rect class="bx" x="400" y="176" width="70" height="32" rx="6"/><text class="sm" x="435" y="197" text-anchor="middle">Pod</text>
+  <rect class="bx" x="480" y="176" width="70" height="32" rx="6"/><text class="sm" x="515" y="197" text-anchor="middle">Pod</text>
+  <rect class="bx" x="560" y="176" width="70" height="32" rx="6"/><text class="sm" x="595" y="197" text-anchor="middle">Pod</text>
+  <rect class="bx-a" x="650" y="176" width="76" height="32" rx="6"/><text class="sm on-a" x="688" y="197" text-anchor="middle">Service</text>
+  <path class="ln" d="M660 92 V136" marker-end="url(#ar)"/>
+  <path class="ln-p" d="M455 92 V136" marker-end="url(#ar)"/>
+  <text class="sm on-p" x="463" y="122">节点拉取镜像</text>
+  <rect class="bx" x="200" y="160" width="130" height="44" rx="10"/>
+  <text class="lbl" x="265" y="187" text-anchor="middle">⑥ 用户访问</text>
+  <path class="ln" d="M376 182 H334" marker-end="url(#ar)"/>
 
-  <!-- 集群 + Namespace -->
-  <rect class="bx-d" x="20" y="96" width="720" height="360" rx="16"/>
-  <text class="sm" x="36" y="116">集群（第 2、3 章）——控制平面 + 工作节点</text>
-  <rect class="bx" x="40" y="126" width="680" height="316" rx="14"/>
-  <text class="ttl" x="56" y="148">Namespace（第 5 章）</text>
-
-  <rect class="bx-a" x="70" y="164" width="200" height="56" rx="10"/>
-  <text class="ttl on-a" x="170" y="188" text-anchor="middle">Service</text>
-  <text class="sm" x="170" y="208" text-anchor="middle">第 7、9 章 · 稳定入口 + DNS</text>
-  <path class="ln-a" d="M300 74 L250 160" marker-end="url(#ar-a)"/>
-
-  <rect class="bx-p" x="320" y="164" width="180" height="56" rx="10"/>
-  <text class="ttl on-p" x="410" y="188" text-anchor="middle">Deployment</text>
-  <text class="sm" x="410" y="208" text-anchor="middle">第 6 章 · 无状态</text>
-  <rect class="bx-p" x="520" y="164" width="180" height="56" rx="10"/>
-  <text class="ttl on-p" x="610" y="188" text-anchor="middle">StatefulSet</text>
-  <text class="sm" x="610" y="208" text-anchor="middle">第 12 章 · 有状态</text>
-
-  <rect class="bx-b" x="70" y="260" width="630" height="90" rx="12"/>
-  <text class="ttl on-b" x="86" y="284">Pod（第 4 章）</text>
-  <rect class="bx-g" x="200" y="272" width="150" height="66" rx="8"/>
-  <text class="ttl on-g" x="275" y="298" text-anchor="middle">容器</text>
-  <text class="sm" x="275" y="318" text-anchor="middle">第 1 章 · 应用</text>
-  <rect class="bx" x="370" y="272" width="150" height="66" rx="8"/>
-  <text class="ttl" x="445" y="298" text-anchor="middle">init / sidecar</text>
-  <text class="sm" x="445" y="318" text-anchor="middle">多容器模式</text>
-  <rect class="bx-r" x="540" y="272" width="150" height="66" rx="8"/>
-  <text class="ttl on-r" x="615" y="298" text-anchor="middle">securityContext</text>
-  <text class="sm" x="615" y="318" text-anchor="middle">第 15、16 章</text>
-
-  <path class="ln" d="M170 222 L170 256" marker-end="url(#ar)"/>
-  <text class="sm" x="178" y="244">标签选择器</text>
-  <path class="ln-p" d="M410 222 V256" marker-end="url(#ar)"/>
-  <path class="ln-p" d="M610 222 V256" marker-end="url(#ar)"/>
-
-  <rect class="bx-g" x="70" y="372" width="300" height="56" rx="10"/>
-  <text class="ttl on-g" x="220" y="396" text-anchor="middle">ConfigMap · Secret</text>
-  <text class="sm" x="220" y="416" text-anchor="middle">第 11 章 · 环境变量 / 卷注入</text>
-  <rect class="bx-g" x="400" y="372" width="300" height="56" rx="10"/>
-  <text class="ttl on-g" x="550" y="396" text-anchor="middle">PVC → PV ← StorageClass</text>
-  <text class="sm" x="550" y="416" text-anchor="middle">第 10 章 · 持久存储（CSI）</text>
-  <path class="ln" d="M220 352 V368" marker-start="url(#ar)"/>
-  <path class="ln" d="M550 352 V368" marker-start="url(#ar)"/>
+  <path class="ln-a" d="M85 92 V250 H560 V224" marker-start="url(#ar-a)"/>
+  <text class="sm on-a" x="300" y="268" text-anchor="middle">⑦ 改代码 → 新标签（1.1）→ 再走一遍 ②③④ → Kubernetes 滚动更新</text>
 </svg>
-<figcaption>图 A-1　全书主要对象之间的关系</figcaption>
+<figcaption>图 19-1　你只需要提供镜像和 YAML，剩下的都交给 Kubernetes</figcaption>
 </figure>
 
-<h2 id="cheatsheet">kubectl 速查</h2>
-
-<div class="tw">
-<table>
-  <tr><th>想做什么</th><th>命令</th><th>章节</th></tr>
-  <tr><td>查看节点</td><td><code>kubectl get nodes</code></td><td>3</td></tr>
-  <tr><td>查看 / 切换 context</td><td><code>kubectl config get-contexts</code> / <code>use-context &lt;名&gt;</code></td><td>3</td></tr>
-  <tr><td>声明式部署</td><td><code>kubectl apply -f &lt;文件&gt;</code></td><td>4</td></tr>
-  <tr><td>查看对象</td><td><code>kubectl get &lt;类型&gt; [-o wide|yaml]</code></td><td>4</td></tr>
-  <tr><td>详细信息与事件</td><td><code>kubectl describe &lt;类型&gt; &lt;名&gt;</code></td><td>4</td></tr>
-  <tr><td>容器日志</td><td><code>kubectl logs &lt;pod&gt; [--container &lt;名&gt;]</code></td><td>4</td></tr>
-  <tr><td>进入容器</td><td><code>kubectl exec -it &lt;pod&gt; -- sh</code></td><td>4</td></tr>
-  <tr><td>查字段文档</td><td><code>kubectl explain pod.spec.restartPolicy</code></td><td>4</td></tr>
-  <tr><td>指定 / 默认 Namespace</td><td><code>-n &lt;ns&gt;</code> / <code>kubectl config set-context --current --namespace &lt;ns&gt;</code></td><td>5</td></tr>
-  <tr><td>扩缩容</td><td><code>kubectl scale deploy &lt;名&gt; --replicas N</code></td><td>6</td></tr>
-  <tr><td>发布状态 / 暂停 / 恢复</td><td><code>kubectl rollout status|pause|resume deploy &lt;名&gt;</code></td><td>6</td></tr>
-  <tr><td>发布历史 / 回滚</td><td><code>kubectl rollout history</code> / <code>rollout undo --to-revision=N</code></td><td>6</td></tr>
-  <tr><td>为 Deployment 创建 Service</td><td><code>kubectl expose deployment &lt;名&gt; --type=LoadBalancer</code></td><td>7</td></tr>
-  <tr><td>查看 EndpointSlice</td><td><code>kubectl get endpointslices</code></td><td>7</td></tr>
-  <tr><td>创建 ConfigMap / Secret</td><td><code>kubectl create cm|secret generic &lt;名&gt; --from-literal k=v</code></td><td>11</td></tr>
-  <tr><td>查看 API 资源和简称</td><td><code>kubectl api-resources</code></td><td>5、14</td></tr>
-  <tr><td>本地暴露 API</td><td><code>kubectl proxy --port 9000 &amp;</code></td><td>14</td></tr>
-  <tr><td>检查权限</td><td><code>kubectl auth can-i &lt;动词&gt; &lt;资源&gt; [--as 用户]</code></td><td>13</td></tr>
-  <tr><td>上一次崩溃的日志</td><td><code>kubectl logs &lt;pod&gt; --previous</code></td><td>17</td></tr>
-  <tr><td>按时间看事件</td><td><code>kubectl get events --sort-by=.lastTimestamp</code></td><td>17</td></tr>
-  <tr><td>临时调试容器</td><td><code>kubectl debug -it &lt;pod&gt; --image=busybox:1.36 --target=&lt;容器&gt;</code></td><td>17</td></tr>
-  <tr><td>绕过 Service 直连</td><td><code>kubectl port-forward deploy/&lt;名&gt; 8888:80</code></td><td>17</td></tr>
-  <tr><td>资源用量 / HPA 状态</td><td><code>kubectl top pods</code> / <code>kubectl get hpa --watch</code></td><td>18</td></tr>
-  <tr><td>给 Namespace 打 PSA 标签</td><td><code>kubectl label ns &lt;ns&gt; pod-security.kubernetes.io/enforce=baseline</code></td><td>15</td></tr>
-</table>
-</div>
-
-<h2 id="glossary">术语表</h2>
-
-<p>以下定义基于原书作者 Nigel Poulton 的术语表，按主题分组整理。</p>
-
-<h3>架构与核心概念</h3>
-<div class="tw">
-<table>
-  <tr><th>术语</th><th>含义</th></tr>
-  <tr><td>集群（Cluster）</td><td>一组协同运行用户应用的工作节点和控制平面节点。</td></tr>
-  <tr><td>控制平面（Control plane）</td><td>每个集群的大脑，包括 API、API 服务器、调度器、所有控制器等，运行在所有控制平面节点上。</td></tr>
-  <tr><td>控制平面节点</td><td>运行控制平面服务的节点，通常不运行用户应用。高可用应部署 3 或 5 个。</td></tr>
-  <tr><td>工作节点（Worker node / Node）</td><td>运行用户应用的节点，运行 kubelet、容器运行时和 kube-proxy。</td></tr>
-  <tr><td>数据平面（Data plane）</td><td>集群中承载用户应用的工作节点。</td></tr>
-  <tr><td>集群存储（Cluster store）</td><td>保存集群和应用状态的控制平面功能，通常基于 etcd，可单独部署成集群以获得更高性能和可用性。</td></tr>
-  <tr><td>etcd</td><td>大多数集群用作集群存储的开源分布式数据库。</td></tr>
-  <tr><td>kubelet</td><td>每个节点上的主代理：监视 API 服务器的新任务，并维持一条汇报通道。</td></tr>
-  <tr><td>kube-proxy</td><td>每个节点上运行，实现把 Service 流量路由到 Pod 的底层规则。</td></tr>
-  <tr><td>云控制器管理器</td><td>与底层云平台集成的控制平面服务，比如为 LoadBalancer Service 创建云负载均衡器。</td></tr>
-  <tr><td>控制器（Controller）</td><td>以调和循环运行的控制平面进程，持续让观测状态匹配期望状态。</td></tr>
-  <tr><td>调和循环（Reconciliation loop）</td><td>通过 API 服务器监视集群状态、确保观测状态匹配期望状态的控制器进程。</td></tr>
-  <tr><td>期望状态（Desired state）</td><td>集群和应用「应该」是什么样子，比如某微服务要 5 个监听 8080 的副本。</td></tr>
-  <tr><td>观测状态（Observed state）</td><td>也叫当前状态、实际状态：集群和应用最新的真实情况。</td></tr>
-  <tr><td>编排器（Orchestrator）</td><td>部署和管理应用的软件。Kubernetes 是基于容器的微服务应用的事实标准编排器。</td></tr>
-  <tr><td>云原生（Cloud native）</td><td>一种设计、构建和运行现代应用与基础设施的方式。作者认为能自愈、按需扩缩、滚动更新（可能还能回滚）的应用就是云原生的。</td></tr>
-  <tr><td>微服务（Microservices）</td><td>把应用功能拆成各自独立的小应用（容器），通过 API 通信，协同组成完整应用的设计模式。</td></tr>
-  <tr><td>K8s</td><td>Kubernetes 的简写，8 代替 K 和 s 之间的 8 个字母，读作 “Kates”。</td></tr>
-</table>
-</div>
-
-<h3>容器与运行时</h3>
-<div class="tw">
-<table>
-  <tr><th>术语</th><th>含义</th></tr>
-  <tr><td>容器（Container）</td><td>运行现代应用的轻量环境。每个容器是一个虚拟的操作系统，有自己的进程树、文件系统、共享内存等。一个容器运行一个应用进程。</td></tr>
-  <tr><td>容器运行时</td><td>每个节点上负责拉镜像、启停容器等底层操作的软件，通常是 containerd 或 CRI-O。Docker 在 1.20 被弃用、1.24 移除支持。</td></tr>
-  <tr><td>containerd</td><td>大多数集群使用的业界标准容器运行时，由 Docker 公司捐给 CNCF，读作 “container dee”。</td></tr>
-  <tr><td>CRI-O</td><td>容器运行时，常见于基于 OpenShift 的集群。</td></tr>
-  <tr><td>CRI</td><td>容器运行时接口，让运行时可插拔，按需选择最合适的运行时。</td></tr>
-  <tr><td>CNI</td><td>容器网络接口，可插拔，第三方插件实现覆盖网络、BGP 网络等。</td></tr>
-  <tr><td>CSI</td><td>容器存储接口，让第三方存储系统接入 Kubernetes；厂商的 CSI 插件以 Pod 形式运行在集群上。</td></tr>
-  <tr><td>服务网格（Service mesh）</td><td>提供 Pod 间流量加密、增强的网络遥测和高级路由的基础设施软件，如 Consul、Istio、Linkerd。</td></tr>
-</table>
-</div>
-
-<h3>工作负载</h3>
-<div class="tw">
-<table>
-  <tr><th>术语</th><th>含义</th></tr>
-  <tr><td>Pod</td><td>Kubernetes 上最小的调度单位。所有容器都必须运行在 Pod 里。Pod 提供共享的执行环境：IP 地址、卷、共享内存等。</td></tr>
-  <tr><td>init 容器</td><td>在主应用容器启动前运行并完成的特殊容器，常用于检查或初始化环境。</td></tr>
-  <tr><td>Sidecar</td><td>与主应用容器一起运行、为其增强功能的特殊容器。服务网格常以 sidecar 注入 Pod。</td></tr>
-  <tr><td>Deployment</td><td>部署和管理一组无状态 Pod 的控制器，支持发布、回滚和自愈，借助 ReplicaSet 实现扩缩和自愈。</td></tr>
-  <tr><td>ReplicaSet</td><td>以控制器形式运行，执行自愈和扩缩，被 Deployment 使用。</td></tr>
-  <tr><td>StatefulSet</td><td>部署和管理有状态 Pod 的控制器，类似 Deployment，但面向有状态应用。</td></tr>
-  <tr><td>清单文件（Manifest file）</td><td>保存一个或多个 Kubernetes 对象配置的 YAML 文件，提交给 API 服务器后即部署到集群。</td></tr>
-  <tr><td>标签（Label）</td><td>用于分组的对象元数据，与标签选择器配合把 Pod 和更高层的控制器、Service 关联起来。</td></tr>
-  <tr><td>标签选择器（Label selector）</td><td>用来确定要对哪些 Pod 执行操作。比如滚动更新时，只有匹配 Deployment 选择器的 Pod 会被替换。</td></tr>
-  <tr><td>注解（Annotation）</td><td>可用于暴露 alpha/beta 功能或与第三方系统集成的对象元数据。</td></tr>
-  <tr><td>Namespace</td><td>把一个集群划分成多个虚拟集群的方式，适合施加不同的配额和访问控制策略，不适合强隔离。</td></tr>
-</table>
-</div>
-
-<h3>网络</h3>
-<div class="tw">
-<table>
-  <tr><th>术语</th><th>含义</th></tr>
-  <tr><td>Service</td><td>首字母大写。为 Pod 中的应用提供网络访问。放在一组 Pod 前面后，Pod 失败、扩缩、被替换都不会改变访问入口；可与云平台集成创建互联网负载均衡器。</td></tr>
-  <tr><td>Endpoints / EndpointSlice</td><td>匹配 Service 标签选择器的健康 Pod 的最新列表，即 Service 会把流量发给谁。EndpointSlice 在大集群上性能更好。</td></tr>
-  <tr><td>Gateway API</td><td>把外部流量路由到 Kubernetes 应用的原生框架，需要 Envoy、NGINX 等第三方实现。</td></tr>
-  <tr><td>Gateway</td><td>用于部署和管理外部负载均衡器的 Gateway API 资源。</td></tr>
-  <tr><td>Listener</td><td>Gateway 的属性。Gateway 代表负载均衡器，listener 代表它的接口，比如监听 8080 的 HTTP 流量。</td></tr>
-  <tr><td>GatewayClass</td><td>把 Gateway 映射到某个 Gateway API 控制器。</td></tr>
-  <tr><td>Gateway 控制器</td><td>监视并调和 Gateway 的控制平面进程。没有默认实现，需要安装第三方的。</td></tr>
-  <tr><td>HTTPRoute</td><td>给 Gateway listener 编程高级路由的资源，比如把 <code>example.com/kits</code> 的 90% 请求发给 Service A、10% 发给 Service B。</td></tr>
-  <tr><td>Ingress</td><td>已弃用，被 Gateway API 取代。</td></tr>
-</table>
-</div>
-
-<h3>存储与配置</h3>
-<div class="tw">
-<table>
-  <tr><th>术语</th><th>含义</th></tr>
-  <tr><td>卷（Volume）</td><td>持久存储的泛称。</td></tr>
-  <tr><td>PersistentVolume（PV）</td><td>在集群上映射存储卷的对象。外部存储必须先映射成 PV 才能被应用使用。</td></tr>
-  <tr><td>PersistentVolumeClaim（PVC）</td><td>像一张允许应用使用 PV 的票据。没有有效的 PVC，应用就用不了 PV。与 StorageClass 配合实现动态创建卷。</td></tr>
-  <tr><td>StorageClass（SC）</td><td>在集群上创建不同存储档位的方式，比如 <code>fast</code> 创建 NVMe 存储，<code>medium-three-site</code> 创建跨三个站点复制的慢速存储。</td></tr>
-  <tr><td>ConfigMap</td><td>保存非敏感配置数据的对象，可在运行时给通用容器加入自定义配置而无需改镜像。</td></tr>
-  <tr><td>Secret</td><td>用于敏感配置数据的「ConfigMap」，把敏感数据保存在镜像之外，运行时注入容器。</td></tr>
-</table>
-</div>
-
-<h3>API 与安全</h3>
-<div class="tw">
-<table>
-  <tr><th>术语</th><th>含义</th></tr>
-  <tr><td>API</td><td>应用程序编程接口。Kubernetes 的所有资源都定义在 RESTful 的 API 中，通过 API 服务器暴露。</td></tr>
-  <tr><td>API 服务器</td><td>在安全端口上通过 HTTPS 暴露 API，运行在控制平面上。</td></tr>
-  <tr><td>API 组</td><td>一组相关的 API 资源，比如网络资源通常在 <code>networking.k8s.io</code> 组里。</td></tr>
-  <tr><td>API 资源</td><td>Pod、Deployment、Service 等所有 Kubernetes 对象都以资源的形式定义在 API 中。</td></tr>
-  <tr><td>CRD</td><td>自定义资源定义，用于向 Kubernetes API 添加你自己的资源。</td></tr>
-  <tr><td>REST</td><td>表述性状态转移，最常见的 Web API 架构，用 GET、POST、PUT、PATCH、DELETE 等 HTTP 方法操作对象。</td></tr>
-  <tr><td>CRUD</td><td>创建、读取、更新、删除四种基本操作。</td></tr>
-  <tr><td>JSON</td><td>JavaScript 对象表示法，Kubernetes 首选的数据发送和存储格式。</td></tr>
-  <tr><td>YAML</td><td>通常用来编写 Kubernetes 配置文件的语言，是 JSON 的超集。</td></tr>
-  <tr><td>kubectl</td><td>Kubernetes 命令行工具，通过 API 服务器发送命令和查询状态。</td></tr>
-  <tr><td>RBAC</td><td>基于角色的访问控制，判断已认证用户能否对集群资源执行操作的授权模块。</td></tr>
-  <tr><td>准入控制器（Admission controller）</td><td>验证或修改资源以执行策略的代码，在认证和授权之后作为 API 准入链的一部分运行。</td></tr>
-</table>
-</div>
-
-<h2 id="next">下一步</h2>
-
-<figure>
-<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="继续学习 Kubernetes 的路线">
-  <rect class="bx-g" x="20" y="60" width="160" height="100" rx="12"/>
-  <text class="ttl on-g" x="100" y="88" text-anchor="middle">✓ 你在这里</text>
-  <text class="sm" x="100" y="112" text-anchor="middle">核心对象、网络、</text>
-  <text class="sm" x="100" y="130" text-anchor="middle">存储、配置、安全</text>
-
-  <rect class="bx-b" x="220" y="20" width="160" height="80" rx="12"/>
-  <text class="ttl on-b" x="300" y="46" text-anchor="middle">打牢容器基础</text>
-  <text class="sm" x="300" y="68" text-anchor="middle">Dockerfile、镜像、</text>
-  <text class="sm" x="300" y="86" text-anchor="middle">多容器应用</text>
-  <rect class="bx-b" x="220" y="120" width="160" height="80" rx="12"/>
-  <text class="ttl on-b" x="300" y="146" text-anchor="middle">继续补齐的对象</text>
-  <text class="sm" x="300" y="168" text-anchor="middle">Job、CronJob、</text>
-  <text class="sm" x="300" y="186" text-anchor="middle">DaemonSet、NetworkPolicy</text>
-
-  <rect class="bx-p" x="420" y="20" width="160" height="80" rx="12"/>
-  <text class="ttl on-p" x="500" y="46" text-anchor="middle">工程化交付</text>
-  <text class="sm" x="500" y="68" text-anchor="middle">Helm、Kustomize、</text>
-  <text class="sm" x="500" y="86" text-anchor="middle">GitOps（Argo CD/Flux）</text>
-  <rect class="bx-p" x="420" y="120" width="160" height="80" rx="12"/>
-  <text class="ttl on-p" x="500" y="146" text-anchor="middle">可观测性</text>
-  <text class="sm" x="500" y="168" text-anchor="middle">Prometheus、Grafana、</text>
-  <text class="sm" x="500" y="186" text-anchor="middle">日志与链路追踪</text>
-
-  <rect class="bx-a" x="620" y="60" width="120" height="100" rx="12"/>
-  <text class="ttl on-a" x="680" y="88" text-anchor="middle">融入社区</text>
-  <text class="sm" x="680" y="112" text-anchor="middle">线上群组、</text>
-  <text class="sm" x="680" y="130" text-anchor="middle">本地 Meetup</text>
-
-  <path class="ln" d="M182 100 L216 62" marker-end="url(#ar)"/>
-  <path class="ln" d="M182 120 L216 158" marker-end="url(#ar)"/>
-  <path class="ln" d="M382 60 H416" marker-end="url(#ar)"/>
-  <path class="ln" d="M382 160 H416" marker-end="url(#ar)"/>
-  <path class="ln" d="M582 60 L616 96" marker-end="url(#ar)"/>
-  <path class="ln" d="M582 160 L616 124" marker-end="url(#ar)"/>
-</svg>
-<figcaption>图 A-2　一条建议的进阶路线（中间两列是本教程补充的建议，并非原书内容）</figcaption>
-</figure>
-
+<p>你需要准备：</p>
 <ul>
-  <li><strong>容器与 AI</strong>：原书作者的 <em>Getting Started with Docker</em>（约 100 页，含一个多容器 AI 应用，一天就能上手）和 <em>Docker Deep Dive</em> 适合继续深入容器。</li>
-  <li><strong>参与社区</strong>：云原生社区里有很多乐于助人的人。加入线上的 Kubernetes 群组和讨论，找找本地的 Kubernetes / 云原生 Meetup。</li>
-  <li><strong>反复动手</strong>：把每章的「动手练习」都做一遍；隔一天再重读一章——新概念需要时间沉淀，这很正常。</li>
-  <li><strong>关注版本更新</strong>：Kubernetes 每年约发布 3 个版本，原书也每年更新。示例仓库地址：<code>github.com/nigelpoulton/TKB</code>（2026 分支）。</li>
+  <li><strong>Docker</strong>（第 3 章装好的 Docker Desktop 即可）和一个 Kubernetes 集群；</li>
+  <li>一个免费的 <strong>Docker Hub 账号</strong>（<code>hub.docker.com</code>），用来存放你的镜像。下文用 <code>&lt;your-dockerhub-id&gt;</code> 表示你的用户名。</li>
 </ul>
 
 <div class="box tip">
-  <div class="t">&#128161; 最后一句话</div>
+  <div class="t">&#128161; 为什么要推到镜像仓库？</div>
   <p>
-    如果只记住一件事，请记住：<strong>你用 YAML 声明期望状态，Kubernetes 的控制器永不停歇地把现实调和成你想要的样子。</strong>
-    全书的每一章，都是这句话在不同对象上的展开。
+    你在本机 <code>docker build</code> 出来的镜像只存在于你的电脑上。集群里的节点（哪怕是本机的 kind 节点，它们其实是独立的容器）要通过镜像仓库来拉取它。
+    推到 Docker Hub 这样的仓库，是在任何集群上都行得通的做法。
   </p>
+</div>
+
+<h2 id="app">认识这个应用</h2>
+
+<p>这是一个只有几行代码的 Node.js Web 应用，用 Express 框架监听 8080 端口，用 Pug 模板渲染首页：</p>
+
+<div class="code" data-lang="js" data-file="extras/source-to-k8s/app/app.js">
+<pre>
+// Simple node.js web app for demonstrating containerizing apps
+// For quick demo purposes only (not properly maintained)
+'use strict';
+
+var express = require('express'),
+    app = express();
+
+app.set('views', 'views');
+app.set('view engine', 'pug');
+
+app.get('/', function(req, res) {
+    res.render('home.pug', {
+  });
+});
+
+app.listen(8080);
+module.exports.getApp = app;
+</pre>
+</div>
+
+<div class="vs">
+  <div class="new">
+    <div class="h">package.json（依赖清单）</div>
+    <div class="code" data-lang="json">
+<pre>
+{
+  "name": "container-web-test",
+  "private": true,
+  "version": "0.0.1",
+  "main": "app.js",
+  "dependencies": {
+    "express": "&gt;=4.21.2",
+    "pug": "&gt;=3.0.3"
+  }
+}
+</pre>
+    </div>
+  </div>
+  <div class="new">
+    <div class="h">views/home.pug（首页模板）</div>
+    <div class="code" data-lang="pug">
+<pre>
+html
+  head
+    title='K8s rocks'
+    link(rel="stylesheet", href="...bootstrap.min.css")
+  body
+    div.container
+      div.jumbotron
+        h1(style="text-align:center;") Kubernetes rocks!
+        p(style="text-align:center;") Version 1.0 - built and deployed by me.
+</pre>
+    </div>
+  </div>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 一个好的细节</div>
+  <p>
+    <code>app.listen(8080)</code> 没有指定地址，Node.js 默认监听所有网络接口（<code>0.0.0.0</code>）。
+    如果写成只监听 <code>127.0.0.1</code>，容器里自己访问没问题，但 Service 和其他 Pod 都连不上（第 17 章案例 7 提到的隐蔽坑）。
+  </p>
+</div>
+
+<h2 id="dockerfile">Dockerfile：把应用打包成镜像</h2>
+
+<p>先看原书 <code>web-app/1.0/Dockerfile</code> 的写法，它简单直观：</p>
+
+<div class="code" data-lang="dockerfile" data-file="web-app/1.0/Dockerfile">
+<pre>
+FROM node:current-alpine                 # 基础镜像：Alpine Linux + 最新版 Node.js
+LABEL MAINTAINER=nigelpoulton@hotmail.com
+COPY . /src                              # 把整个目录复制进镜像的 /src
+RUN cd /src; npm install                 # 安装依赖
+WORKDIR /src                             # 之后的命令和容器的工作目录
+EXPOSE 8080                              # 声明应用监听的端口（只是文档作用）
+CMD ["node", "./app.js"]                 # 容器启动时执行的命令
+</pre>
+</div>
+
+<h3>每条指令都是一层</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 270" role="img" aria-label="Dockerfile 指令对应镜像层，以及构建缓存的作用">
+  <text class="ttl" x="190" y="22" text-anchor="middle">原版：先复制全部代码</text>
+  <rect class="bx" x="40" y="36" width="300" height="34" rx="6"/><text class="mono sm" x="56" y="58">FROM node:current-alpine</text>
+  <rect class="bx" x="40" y="76" width="300" height="34" rx="6"/><text class="mono sm" x="56" y="98">COPY . /src</text>
+  <rect class="bx-r" x="40" y="116" width="300" height="34" rx="6"/><text class="mono sm" x="56" y="138">RUN npm install</text>
+  <text class="sm on-r" x="190" y="176" text-anchor="middle">改了一个字的模板 → COPY 层变了</text>
+  <text class="sm on-r" x="190" y="196" text-anchor="middle">→ 它之后的层全部重建，</text>
+  <text class="sm on-r" x="190" y="216" text-anchor="middle">每次都要重新 npm install（慢）</text>
+
+  <text class="ttl" x="570" y="22" text-anchor="middle">改进版：先复制依赖清单</text>
+  <rect class="bx" x="420" y="36" width="300" height="34" rx="6"/><text class="mono sm" x="436" y="58">FROM node:24-alpine</text>
+  <rect class="bx-g" x="420" y="76" width="300" height="34" rx="6"/><text class="mono sm" x="436" y="98">COPY package.json ./</text>
+  <rect class="bx-g" x="420" y="116" width="300" height="34" rx="6"/><text class="mono sm" x="436" y="138">RUN npm install</text>
+  <rect class="bx-a" x="420" y="156" width="300" height="34" rx="6"/><text class="mono sm" x="436" y="178">COPY . .</text>
+  <text class="sm on-g" x="570" y="216" text-anchor="middle">只改代码 → 前面的层直接用缓存，</text>
+  <text class="sm on-g" x="570" y="236" text-anchor="middle">只有最后一层重建（快）</text>
+  <text class="sm" x="380" y="262" text-anchor="middle">规则：变化少的放前面，变化多的放后面</text>
+</svg>
+<figcaption>图 19-2　指令顺序决定了缓存能复用多少</figcaption>
+</figure>
+
+<h3>改进版 Dockerfile</h3>
+
+<div class="code" data-lang="dockerfile" data-file="extras/source-to-k8s/app/Dockerfile">
+<pre>
+# Pin a specific major version instead of the moving "current" tag
+FROM node:24-alpine
+
+# tini runs as PID 1 and forwards SIGTERM to node, so Pods stop quickly
+RUN apk add --no-cache tini
+
+WORKDIR /src
+
+# Copy the dependency list first: this layer is only rebuilt when package.json changes
+COPY package.json ./
+RUN npm install --omit=dev
+
+# Then copy the rest of the source code
+COPY . .
+
+# Don't run as root (the node user ships with the official image)
+USER node
+
+EXPOSE 8080
+ENTRYPOINT ["/sbin/tini", "--"]
+CMD ["node", "app.js"]
+</pre>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th>改动</th><th>为什么</th></tr>
+  <tr><td><code>node:24-alpine</code> 代替 <code>node:current-alpine</code></td><td><code>current</code> 会随时指向新的大版本，今天和下个月构建出来的镜像可能不一样。固定大版本让构建可重复</td></tr>
+  <tr><td>先 <code>COPY package.json</code> 再 <code>npm install</code></td><td>利用构建缓存（图 19-2）</td></tr>
+  <tr><td><code>--omit=dev</code></td><td>不安装开发依赖，镜像更小、攻击面更小</td></tr>
+  <tr><td><code>.dockerignore</code></td><td>排除本地的 <code>node_modules</code>、<code>.git</code> 等，避免把不该带的东西复制进镜像、拖慢构建</td></tr>
+  <tr><td><code>USER node</code></td><td>不以 root 运行（第 15 章），也能满足 PSA restricted 策略对 <code>runAsNonRoot</code> 的要求</td></tr>
+  <tr><td><code>tini</code> 作为入口</td><td>正确处理退出信号，见下文</td></tr>
+</table>
+</div>
+
+<h3>为什么需要 tini：PID 1 与优雅退出</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="没有 tini 时 node 作为 PID 1 忽略 SIGTERM，Pod 要等 30 秒才被强杀">
+  <rect class="bx-r" x="20" y="14" width="350" height="200" rx="14"/>
+  <text class="ttl on-r" x="195" y="40" text-anchor="middle">node 直接作为 PID 1</text>
+  <rect class="bx" x="40" y="56" width="120" height="40" rx="8"/><text class="sm" x="100" y="81" text-anchor="middle">kubelet 发 SIGTERM</text>
+  <rect class="bx" x="230" y="56" width="120" height="40" rx="8"/><text class="sm" x="290" y="81" text-anchor="middle">node（PID 1）</text>
+  <path class="ln" d="M162 76 H226" marker-end="url(#ar)"/>
+  <text class="sm" x="195" y="122" text-anchor="middle">没写信号处理的 PID 1 进程会忽略 SIGTERM</text>
+  <text class="sm" x="195" y="146" text-anchor="middle">→ 等满 terminationGracePeriodSeconds（30 秒）</text>
+  <text class="sm" x="195" y="170" text-anchor="middle">→ SIGKILL 强杀</text>
+  <text class="sm on-r" x="195" y="198" text-anchor="middle">每次滚动更新、缩容都要白等 30 秒</text>
+
+  <rect class="bx-g" x="390" y="14" width="350" height="200" rx="14"/>
+  <text class="ttl on-g" x="565" y="40" text-anchor="middle">tini 作为 PID 1</text>
+  <rect class="bx" x="400" y="56" width="100" height="40" rx="8"/><text class="sm" x="450" y="81" text-anchor="middle">SIGTERM</text>
+  <rect class="bx-a" x="520" y="56" width="90" height="40" rx="8"/><text class="sm on-a" x="565" y="81" text-anchor="middle">tini（PID 1）</text>
+  <rect class="bx" x="630" y="56" width="96" height="40" rx="8"/><text class="sm" x="678" y="81" text-anchor="middle">node</text>
+  <path class="ln" d="M502 76 H516" marker-end="url(#ar)"/>
+  <path class="ln" d="M612 76 H626" marker-end="url(#ar)"/>
+  <text class="sm" x="565" y="122" text-anchor="middle">tini 把信号转发给 node，</text>
+  <text class="sm" x="565" y="146" text-anchor="middle">node 收到 SIGTERM 的默认行为就是退出</text>
+  <text class="sm" x="565" y="170" text-anchor="middle">tini 还负责回收僵尸子进程</text>
+  <text class="sm on-g" x="565" y="198" text-anchor="middle">Pod 几乎立刻终止</text>
+</svg>
+<figcaption>图 19-3　容器里的第一个进程（PID 1）有特殊的信号规则</figcaption>
+</figure>
+
+<p>另一种做法是在应用代码里自己处理 <code>SIGTERM</code>：停止接收新连接、处理完进行中的请求再退出。这对真实的生产服务更好，tini 是不改代码时的简单方案。</p>
+
+<h2 id="build">构建并在本机测试</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 140" role="img" aria-label="镜像名称的组成部分">
+  <text class="mono ttl" x="380" y="44" text-anchor="middle" style="font-size:20px"><tspan class="on-p">docker.io</tspan>/<tspan class="on-b">yourname</tspan>/<tspan class="on-g">k8sbook-web</tspan>:<tspan class="on-a">1.0</tspan></text>
+  <text class="sm on-p" x="200" y="84" text-anchor="middle">镜像仓库地址</text>
+  <text class="sm on-p" x="200" y="100" text-anchor="middle">（Docker Hub 可省略）</text>
+  <text class="sm on-b" x="330" y="84" text-anchor="middle">用户 / 组织</text>
+  <text class="sm on-g" x="475" y="84" text-anchor="middle">存储库</text>
+  <text class="sm on-a" x="590" y="84" text-anchor="middle">标签（版本）</text>
+  <path class="ln-p" d="M235 52 L210 72"/><path class="ln-b" d="M330 52 V72"/><path class="ln-g" d="M460 52 L470 72"/><path class="ln-a" d="M565 52 L585 72"/>
+  <text class="sm" x="380" y="130" text-anchor="middle">私有仓库写全地址，例如 ghcr.io/org/app:1.0；也可以用摘要 @sha256:… 精确锁定内容</text>
+</svg>
+<figcaption>图 19-4　镜像名的结构</figcaption>
+</figure>
+
+<div class="code" data-lang="bash">
+<pre>
+$ cd extras/source-to-k8s/app
+$ docker build -t &lt;your-dockerhub-id&gt;/k8sbook-web:1.0 .
+[+] Building 25.3s (11/11) FINISHED
+ =&gt; [1/6] FROM docker.io/library/node:24-alpine
+ =&gt; [2/6] RUN apk add --no-cache tini
+ =&gt; [3/6] WORKDIR /src
+ =&gt; [4/6] COPY package.json ./
+ =&gt; [5/6] RUN npm install --omit=dev
+ =&gt; [6/6] COPY . .
+ =&gt; exporting to image
+ =&gt; =&gt; naming to docker.io/&lt;your-dockerhub-id&gt;/k8sbook-web:1.0
+
+$ docker images | grep k8sbook-web
+&lt;your-dockerhub-id&gt;/k8sbook-web   1.0   3f2a9c1b7d4e   10 seconds ago   180MB
+</pre>
+</div>
+
+<p>上集群之前，先在本机用 Docker 跑起来确认能用——这比在集群里排错快得多：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ docker run -d --name web-test -p 8080:8080 &lt;your-dockerhub-id&gt;/k8sbook-web:1.0
+$ curl -s localhost:8080 | grep h1
+&lt;h1 style="text-align:center;"&gt;Kubernetes rocks!&lt;/h1&gt;
+$ docker rm -f web-test
+</pre>
+</div>
+
+<h2 id="push">推送到镜像仓库</h2>
+
+<div class="code" data-lang="bash">
+<pre>
+$ docker login                     # 输入 Docker Hub 用户名和密码（或访问令牌）
+Login Succeeded
+
+$ docker push &lt;your-dockerhub-id&gt;/k8sbook-web:1.0
+The push refers to repository [docker.io/&lt;your-dockerhub-id&gt;/k8sbook-web]
+...
+1.0: digest: sha256:9b1e…  size: 1789
+</pre>
+</div>
+
+<p>推送成功后，在 Docker Hub 网页上能看到这个存储库。新建的存储库默认是<strong>公开</strong>的，任何人都能拉取——别把密码、密钥打进镜像（第 16 章 IBM 的教训）。</p>
+
+<div class="box warn">
+  <div class="t">&#9888; 用 Apple Silicon（M 系列芯片）的 Mac？</div>
+  <p>
+    你构建出的镜像默认是 <code>arm64</code> 架构的。如果集群节点是 <code>amd64</code>（大多数云主机），Pod 会报 <code>exec format error</code> 并反复崩溃。
+    用 <code>buildx</code> 同时构建两种架构并直接推送：
+  </p>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ docker buildx build --platform linux/amd64,linux/arm64 \
+  -t &lt;your-dockerhub-id&gt;/k8sbook-web:1.0 --push .
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 170" role="img" aria-label="多架构镜像：同一个标签下包含多个架构的镜像">
+  <rect class="bx-p" x="40" y="40" width="240" height="90" rx="12"/>
+  <text class="ttl on-p" x="160" y="66" text-anchor="middle">k8sbook-web:1.0</text>
+  <text class="sm" x="160" y="90" text-anchor="middle">多架构清单（manifest list）</text>
+  <text class="sm" x="160" y="110" text-anchor="middle">一个标签，多个版本</text>
+  <rect class="bx" x="360" y="24" width="140" height="44" rx="8"/><text class="sm" x="430" y="51" text-anchor="middle">linux/amd64 镜像</text>
+  <rect class="bx" x="360" y="102" width="140" height="44" rx="8"/><text class="sm" x="430" y="129" text-anchor="middle">linux/arm64 镜像</text>
+  <rect class="bx-g" x="580" y="24" width="150" height="44" rx="8"/><text class="sm on-g" x="655" y="51" text-anchor="middle">x86 云主机节点</text>
+  <rect class="bx-g" x="580" y="102" width="150" height="44" rx="8"/><text class="sm on-g" x="655" y="129" text-anchor="middle">ARM 节点 / M 系列 Mac</text>
+  <path class="ln" d="M282 75 L356 46" marker-end="url(#ar)"/>
+  <path class="ln" d="M282 95 L356 124" marker-end="url(#ar)"/>
+  <path class="ln-g" d="M576 46 H504" marker-end="url(#ar-g)"/>
+  <path class="ln-g" d="M576 124 H504" marker-end="url(#ar-g)"/>
+  <text class="sm" x="540" y="90" text-anchor="middle">各取所需</text>
+</svg>
+<figcaption>图 19-5　节点拉取镜像时会自动选择匹配自己 CPU 架构的那一份</figcaption>
+</figure>
+
+<h2 id="deploy">部署到 Kubernetes</h2>
+
+<p>部署文件把前面各章的最佳实践都用上了：就绪和存活探针（第 18 章）、资源配置、<code>maxUnavailable: 0</code> 的滚动更新（第 6 章）：</p>
+
+<div class="code" data-lang="yaml" data-file="extras/source-to-k8s/deploy.yml">
+<pre>
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-web
+spec:
+  replicas: 3
+  revisionHistoryLimit: 5
+  minReadySeconds: 5
+  selector:
+    matchLabels:
+      app: my-web
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0          # 更新过程中一个都不少
+      maxSurge: 1                # 每次多起 1 个新的
+  template:
+    metadata:
+      labels:
+        app: my-web
+    spec:
+      containers:
+      - name: web
+        image: &lt;your-dockerhub-id&gt;/k8sbook-web:1.0     # ← 改成你的镜像
+        ports:
+        - containerPort: 8080
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          periodSeconds: 5
+        livenessProbe:
+          tcpSocket:
+            port: 8080
+          periodSeconds: 10
+          failureThreshold: 3
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-web
+spec:
+  type: LoadBalancer
+  selector:
+    app: my-web
+  ports:
+  - port: 8080
+    targetPort: 8080
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ cd ..                                                       # 回到 extras/source-to-k8s
+$ sed -i 's/&lt;your-dockerhub-id&gt;/yourname/' deploy.yml        # Mac 上用 sed -i '' 's/…/…/' deploy.yml
+$ kubectl apply -f deploy.yml
+deployment.apps/my-web created
+service/my-web created
+
+$ kubectl get pods -l app=my-web
+NAME                      READY   STATUS    RESTARTS   AGE
+my-web-6b8d9f7c5d-4kq9z   1/1     Running   0          20s
+my-web-6b8d9f7c5d-hx2mp   1/1     Running   0          20s
+my-web-6b8d9f7c5d-tq7wn   1/1     Running   0          20s
+
+$ kubectl get svc my-web
+NAME     TYPE           CLUSTER-IP     EXTERNAL-IP   PORT(S)          AGE
+my-web   LoadBalancer   10.96.143.12   localhost     8080:31544/TCP   25s
+</pre>
+</div>
+
+<p>浏览器打开 <code>EXTERNAL-IP:8080</code>（Docker Desktop 上是 <code>localhost:8080</code>），就能看到「Version 1.0 - built and deployed by me.」——<strong>这是你自己构建的应用</strong>。如果 Pod 没起来，回到第 17 章按三板斧排查，最常见的是镜像名写错（ImagePullBackOff）。</p>
+
+<h2 id="update">改代码，发布新版本</h2>
+
+<p>修改首页模板，比如把版本号改成 1.1：</p>
+
+<div class="code" data-lang="pug" data-file="extras/source-to-k8s/app/views/home.pug（修改）">
+<pre>
+        p(style="text-align:center;") Version 1.1 - now with a new headline!
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ cd app
+$ docker build -t &lt;your-dockerhub-id&gt;/k8sbook-web:1.1 .      # 这次只有最后一层需要重建
+$ docker push &lt;your-dockerhub-id&gt;/k8sbook-web:1.1
+$ cd ..
+</pre>
+</div>
+
+<p>然后<strong>修改 deploy.yml 里的镜像标签</strong>（1.0 → 1.1）再 apply——坚持声明式（第 6 章）：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ sed -i 's/k8sbook-web:1.0/k8sbook-web:1.1/' deploy.yml
+$ kubectl apply -f deploy.yml
+deployment.apps/my-web configured
+
+$ kubectl rollout status deploy/my-web
+Waiting for deployment "my-web" rollout to finish: 1 out of 3 new replicas have been updated...
+Waiting for deployment "my-web" rollout to finish: 2 out of 3 new replicas have been updated...
+Waiting for deployment "my-web" rollout to finish: 1 old replicas are pending termination...
+deployment "my-web" successfully rolled out
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="maxUnavailable 为 0 时的滚动更新，始终保持至少 3 个就绪副本">
+  <text class="ttl" x="20" y="22">maxUnavailable: 0，maxSurge: 1 —— 先加后减，可用副本永远不少于 3</text>
+  <text class="sm" x="20" y="58">开始</text>
+  <text class="sm" x="20" y="100">加 1 个新的</text>
+  <text class="sm" x="20" y="142">新的就绪，减 1 个旧的</text>
+  <text class="sm" x="20" y="184">…… 重复直到全部替换</text>
+  <g>
+    <rect class="bx-b" x="200" y="40" width="70" height="28" rx="5"/><text class="sm on-b" x="235" y="59" text-anchor="middle">1.0</text>
+    <rect class="bx-b" x="280" y="40" width="70" height="28" rx="5"/><text class="sm on-b" x="315" y="59" text-anchor="middle">1.0</text>
+    <rect class="bx-b" x="360" y="40" width="70" height="28" rx="5"/><text class="sm on-b" x="395" y="59" text-anchor="middle">1.0</text>
+  </g>
+  <g>
+    <rect class="bx-b" x="200" y="82" width="70" height="28" rx="5"/><text class="sm on-b" x="235" y="101" text-anchor="middle">1.0</text>
+    <rect class="bx-b" x="280" y="82" width="70" height="28" rx="5"/><text class="sm on-b" x="315" y="101" text-anchor="middle">1.0</text>
+    <rect class="bx-b" x="360" y="82" width="70" height="28" rx="5"/><text class="sm on-b" x="395" y="101" text-anchor="middle">1.0</text>
+    <rect class="bx-g" x="440" y="82" width="70" height="28" rx="5" stroke-dasharray="4 3"/><text class="sm on-g" x="475" y="101" text-anchor="middle">1.1 启动中</text>
+  </g>
+  <g>
+    <rect class="bx-r" x="200" y="124" width="70" height="28" rx="5" stroke-dasharray="4 3"/><text class="sm on-r" x="235" y="143" text-anchor="middle">终止</text>
+    <rect class="bx-b" x="280" y="124" width="70" height="28" rx="5"/><text class="sm on-b" x="315" y="143" text-anchor="middle">1.0</text>
+    <rect class="bx-b" x="360" y="124" width="70" height="28" rx="5"/><text class="sm on-b" x="395" y="143" text-anchor="middle">1.0</text>
+    <rect class="bx-g" x="440" y="124" width="70" height="28" rx="5"/><text class="sm on-g" x="475" y="143" text-anchor="middle">1.1 ✓</text>
+  </g>
+  <g>
+    <rect class="bx-g" x="200" y="166" width="70" height="28" rx="5"/><text class="sm on-g" x="235" y="185" text-anchor="middle">1.1</text>
+    <rect class="bx-g" x="280" y="166" width="70" height="28" rx="5"/><text class="sm on-g" x="315" y="185" text-anchor="middle">1.1</text>
+    <rect class="bx-g" x="360" y="166" width="70" height="28" rx="5"/><text class="sm on-g" x="395" y="185" text-anchor="middle">1.1</text>
+  </g>
+  <rect class="bx-d" x="540" y="40" width="200" height="154" rx="10"/>
+  <text class="sm" x="640" y="70" text-anchor="middle">「就绪」由就绪探针判断：</text>
+  <text class="sm" x="640" y="92" text-anchor="middle">GET / 返回 200</text>
+  <text class="sm" x="640" y="122" text-anchor="middle">再等 minReadySeconds（5 秒）</text>
+  <text class="sm" x="640" y="144" text-anchor="middle">才算可用，才删旧的</text>
+  <text class="sm" x="640" y="174" text-anchor="middle">tini 让旧 Pod 秒退</text>
+  <text class="sm" x="380" y="220" text-anchor="middle">探针、资源、信号处理、发布策略各司其职，才有真正的零停机</text>
+</svg>
+<figcaption>图 19-6　这一章用到的每个细节，最终都服务于平滑发布</figcaption>
+</figure>
+
+<p>刷新浏览器，看到「Version 1.1」。发现新版本有问题？回滚（第 6 章），记得同时把 YAML 改回去：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl rollout undo deploy/my-web
+$ sed -i 's/k8sbook-web:1.1/k8sbook-web:1.0/' deploy.yml
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 每个版本一个新标签，永远不要覆盖</div>
+  <p>
+    如果你修改代码后仍然推送到 <code>1.0</code> 这个标签，Kubernetes 看到 YAML 没变化，不会做任何事；即使手动重建 Pod，
+    已经缓存了旧 <code>1.0</code> 的节点也可能继续使用旧镜像（默认 <code>imagePullPolicy: IfNotPresent</code>）。
+    同理，<strong>不要在生产中使用 <code>latest</code></strong>：你无法从 YAML 看出跑的是哪个版本，也无法可靠地回滚。
+    更严格的做法是用镜像摘要（<code>@sha256:…</code>）部署。
+  </p>
+</div>
+
+<h2 id="private">使用私有镜像仓库</h2>
+
+<p>公司的镜像通常放在私有仓库里（第 16 章）。节点拉取私有镜像需要凭据，否则就是第 17 章案例 2 里的 <code>pull access denied</code>：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 170" role="img" aria-label="通过 imagePullSecrets 让节点拉取私有镜像">
+  <rect class="bx-r" x="20" y="50" width="170" height="70" rx="12"/>
+  <text class="ttl on-r" x="105" y="78" text-anchor="middle">Secret</text>
+  <text class="sm" x="105" y="98" text-anchor="middle">类型 docker-registry</text>
+  <text class="mono sm" x="105" y="114" text-anchor="middle">regcred</text>
+  <rect class="bx-b" x="270" y="50" width="200" height="70" rx="12"/>
+  <text class="ttl on-b" x="370" y="78" text-anchor="middle">Pod spec</text>
+  <text class="mono sm" x="370" y="100" text-anchor="middle">imagePullSecrets:</text>
+  <text class="mono sm" x="370" y="114" text-anchor="middle">- name: regcred</text>
+  <rect class="bx-p" x="550" y="50" width="190" height="70" rx="12"/>
+  <text class="ttl on-p" x="645" y="78" text-anchor="middle">私有镜像仓库</text>
+  <text class="sm" x="645" y="100" text-anchor="middle">kubelet 带着凭据</text>
+  <text class="sm" x="645" y="114" text-anchor="middle">去拉镜像 ✓</text>
+  <path class="ln" d="M192 85 H266" marker-end="url(#ar)"/>
+  <path class="ln" d="M472 85 H546" marker-end="url(#ar)"/>
+  <text class="sm" x="380" y="154" text-anchor="middle">也可以把 imagePullSecrets 加到 ServiceAccount 上，该 SA 下的所有 Pod 自动使用</text>
+</svg>
+<figcaption>图 19-7　拉取凭据也是一种 Secret（第 11 章）</figcaption>
+</figure>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl create secret docker-registry regcred \
+  --docker-server=ghcr.io \
+  --docker-username=&lt;用户名&gt; \
+  --docker-password=&lt;访问令牌&gt;
+</pre>
+</div>
+
+<div class="code" data-lang="yaml">
+<pre>
+    spec:
+      imagePullSecrets:
+      - name: regcred                  # 和 Pod 在同一个 Namespace
+      containers:
+      - name: web
+        image: ghcr.io/your-org/k8sbook-web:1.1
+</pre>
+</div>
+
+<h2 id="checklist">上线前检查清单</h2>
+
+<div class="tw">
+<table>
+  <tr><th>环节</th><th>检查项</th><th>参考</th></tr>
+  <tr><td>镜像</td><td>基础镜像固定版本；利用缓存的指令顺序；有 <code>.dockerignore</code>；不含密钥；非 root 运行</td><td>本章、第 15、16 章</td></tr>
+  <tr><td>镜像</td><td>正确处理 SIGTERM（tini 或代码里处理）；架构匹配集群节点</td><td>本章</td></tr>
+  <tr><td>镜像仓库</td><td>每个版本唯一标签，不用 <code>latest</code>；私有仓库配置 <code>imagePullSecrets</code>；推送前做漏洞扫描</td><td>本章、第 16 章</td></tr>
+  <tr><td>Deployment</td><td>设置 requests/limits；配置就绪和存活探针；合理的滚动更新参数</td><td>第 6、18 章</td></tr>
+  <tr><td>配置</td><td>环境相关的配置放 ConfigMap，敏感数据放 Secret，不要打进镜像</td><td>第 11 章</td></tr>
+  <tr><td>发布</td><td>改 YAML 再 apply；用 <code>rollout status</code> 盯发布；出问题先 <code>rollout undo</code></td><td>第 6、17 章</td></tr>
+</table>
+</div>
+
+<h2 id="cleanup">清理</h2>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl delete -f deploy.yml
+$ docker rmi &lt;your-dockerhub-id&gt;/k8sbook-web:1.0 &lt;your-dockerhub-id&gt;/k8sbook-web:1.1
+# Docker Hub 上的存储库可以在网页的 Settings 里删除
+</pre>
+</div>
+
+<h2 id="summary">小结</h2>
+<ul>
+  <li>把应用送上 Kubernetes 的标准流程：源码 + Dockerfile → <code>docker build</code> → <code>docker push</code> → <code>kubectl apply</code>。</li>
+  <li>Dockerfile 的每条指令是一层：变化少的放前面，充分利用缓存；固定基础镜像版本，非 root 运行，用 tini 或代码正确处理 SIGTERM。</li>
+  <li>镜像要推到集群能访问的仓库；私有仓库用 <code>imagePullSecrets</code>；注意 CPU 架构匹配。</li>
+  <li>每个版本使用新的标签，改 YAML 后 apply，由 Deployment 完成零停机滚动更新，必要时回滚。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>用 <code>docker history &lt;镜像&gt;</code> 分别查看原版和改进版 Dockerfile 构建出的镜像，比较层数和大小。</li>
+    <li>把改进版 Dockerfile 里的 <code>ENTRYPOINT</code> 行删掉重新构建，部署后执行 <code>kubectl delete pod</code>，用 <code>time</code> 比较删除所需时间。</li>
+    <li>给 <code>app.js</code> 加一个 <code>/healthz</code> 路由，把存活探针改成 <code>httpGet /healthz</code>，发布为 1.2 版本。</li>
+    <li>参考第 15 章，给 Deployment 加上 <code>securityContext</code>（<code>runAsNonRoot: true</code>、<code>allowPrivilegeEscalation: false</code>），部署到一个 enforce=restricted 的 Namespace 里，看看还缺哪些设置。</li>
+  </ol>
 </div>
 
 <div id="pager"></div>

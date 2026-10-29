@@ -1,0 +1,15 @@
+# A Job that always fails, to show backoffLimit and activeDeadlineSeconds.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: always-fails
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 120
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: worker
+        image: busybox:1.36
+        command: ["sh", "-c", "echo trying...; exit 1"]

@@ -1,0 +1,604 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 20 章 · Job、CronJob 与 DaemonSet — Kubernetes 入门实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="20">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 20 章 · 补充篇</span>
+<h1>Job、CronJob 与 DaemonSet</h1>
+<p class="lede">
+  Deployment 管的是「一直运行」的无状态服务，StatefulSet 管的是有状态应用。但还有三类同样常见的需求：
+  <strong>跑完就结束的任务</strong>、<strong>按时间表定期运行的任务</strong>，以及<strong>每个节点上都要有一份的后台程序</strong>。
+  它们分别由 Job、CronJob 和 DaemonSet 来管理。
+</p>
+
+<div class="box note">
+  <div class="t">&#9432; 关于补充篇</div>
+  <p>本章不是原书内容（原书只在第 2、4 章提到过这些对象的名字）。配套文件在仓库的 <code>extras/workloads/</code> 目录。</p>
+</div>
+
+<!-- TODO(verify): 本章命令输出尚未在真实集群上验证，验证后删除下面的提示框 -->
+<div class="box warn">
+  <div class="t">&#9888; 待验证：本章命令输出尚未在真实集群上运行核对</div>
+  <p>
+    本章的示例 YAML 已通过语法校验，但文中展示的命令输出是按 Kubernetes 标准格式整理的，<strong>还没有在真实集群上逐条运行核对</strong>。
+    如果你实际看到的输出与文中不同，以你的集群为准。
+  </p>
+</div>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>根据应用类型选对工作负载控制器</li>
+    <li>用 Job 运行一次性任务，掌握 <code>completions</code>、<code>parallelism</code>、<code>backoffLimit</code> 等参数</li>
+    <li>用 CronJob 运行定时任务，读懂 cron 表达式和并发策略</li>
+    <li>用 DaemonSet 在每个节点上运行一个 Pod，理解它与污点、容忍的关系</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="choose">选对工作负载控制器</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="根据应用特点选择工作负载控制器的决策树">
+  <rect class="bx" x="270" y="14" width="220" height="44" rx="10"/>
+  <text class="ttl" x="380" y="41" text-anchor="middle">你的应用会自己结束吗？</text>
+
+  <rect class="bx" x="40" y="96" width="250" height="44" rx="10"/>
+  <text class="lbl" x="165" y="116" text-anchor="middle">会：做完一件事就退出</text>
+  <text class="sm" x="165" y="132" text-anchor="middle">需要定期重复吗？</text>
+  <rect class="bx" x="470" y="96" width="250" height="44" rx="10"/>
+  <text class="lbl" x="595" y="116" text-anchor="middle">不会：一直运行</text>
+  <text class="sm" x="595" y="132" text-anchor="middle">每个节点都要一份吗？</text>
+  <path class="ln" d="M330 60 L200 92" marker-end="url(#ar)"/>
+  <path class="ln" d="M430 60 L560 92" marker-end="url(#ar)"/>
+
+  <rect class="bx-a" x="20" y="186" width="130" height="94" rx="12"/>
+  <text class="ttl on-a" x="85" y="212" text-anchor="middle">Job</text>
+  <text class="sm" x="85" y="236" text-anchor="middle">一次性任务</text>
+  <text class="sm" x="85" y="254" text-anchor="middle">数据迁移、批处理</text>
+  <text class="sm" x="85" y="270" text-anchor="middle">报表生成</text>
+  <rect class="bx-a" x="170" y="186" width="140" height="94" rx="12"/>
+  <text class="ttl on-a" x="240" y="212" text-anchor="middle">CronJob</text>
+  <text class="sm" x="240" y="236" text-anchor="middle">定时任务</text>
+  <text class="sm" x="240" y="254" text-anchor="middle">每晚备份、定期清理</text>
+  <text class="sm" x="240" y="270" text-anchor="middle">定时发报告</text>
+  <path class="ln" d="M120 142 L90 182" marker-end="url(#ar)"/><text class="sm" x="80" y="166">否</text>
+  <path class="ln" d="M210 142 L235 182" marker-end="url(#ar)"/><text class="sm" x="232" y="166">是</text>
+
+  <rect class="bx-p" x="350" y="186" width="130" height="94" rx="12"/>
+  <text class="ttl on-p" x="415" y="212" text-anchor="middle">DaemonSet</text>
+  <text class="sm" x="415" y="236" text-anchor="middle">每个节点一个</text>
+  <text class="sm" x="415" y="254" text-anchor="middle">日志采集、监控代理</text>
+  <text class="sm" x="415" y="270" text-anchor="middle">网络插件</text>
+  <rect class="bx-b" x="500" y="186" width="120" height="94" rx="12"/>
+  <text class="ttl on-b" x="560" y="212" text-anchor="middle">Deployment</text>
+  <text class="sm" x="560" y="236" text-anchor="middle">无状态服务</text>
+  <text class="sm" x="560" y="254" text-anchor="middle">不需要固定身份</text>
+  <text class="sm" x="560" y="270" text-anchor="middle">第 6 章</text>
+  <rect class="bx-g" x="630" y="186" width="120" height="94" rx="12"/>
+  <text class="ttl on-g" x="690" y="212" text-anchor="middle">StatefulSet</text>
+  <text class="sm" x="690" y="236" text-anchor="middle">有状态应用</text>
+  <text class="sm" x="690" y="254" text-anchor="middle">固定名字和存储</text>
+  <text class="sm" x="690" y="270" text-anchor="middle">第 12 章</text>
+  <path class="ln" d="M540 142 L430 182" marker-end="url(#ar)"/><text class="sm" x="470" y="166">是</text>
+  <path class="ln" d="M620 142 L620 162 L600 182" marker-end="url(#ar)"/>
+  <path class="ln" d="M620 162 L680 182" marker-end="url(#ar)"/>
+  <text class="sm" x="628" y="158">否</text>
+</svg>
+<figcaption>图 20-1　五种工作负载控制器，各管一类应用</figcaption>
+</figure>
+
+<p>它们都是同一套架构：一个 API 资源 + 一个在控制平面上运行调和循环的控制器，最终都通过创建 Pod 来干活。</p>
+
+<h2 id="job">Job：跑完就结束</h2>
+
+<p>
+  Deployment 里的 Pod 一旦退出，就会被重启或替换，因为它的目标是「一直有 N 个在运行」。
+  Job 的目标完全不同：<strong>确保有 N 个 Pod 成功完成</strong>。Pod 成功退出（退出码 0）后不会再被拉起，Job 记为完成。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="Deployment 与 Job 对 Pod 退出的不同处理">
+  <rect class="bx-b" x="20" y="14" width="350" height="170" rx="14"/>
+  <text class="ttl on-b" x="195" y="40" text-anchor="middle">Deployment：保持运行</text>
+  <rect class="bx" x="50" y="60" width="110" height="40" rx="8"/><text class="sm" x="105" y="85" text-anchor="middle">Pod 退出</text>
+  <rect class="bx-g" x="230" y="60" width="110" height="40" rx="8"/><text class="sm on-g" x="285" y="85" text-anchor="middle">立刻再拉起</text>
+  <path class="ln" d="M162 80 H226" marker-end="url(#ar)"/>
+  <text class="sm" x="195" y="132" text-anchor="middle">期望状态：「一直有 3 个在跑」</text>
+  <text class="sm" x="195" y="152" text-anchor="middle">restartPolicy 只能是 Always</text>
+
+  <rect class="bx-a" x="390" y="14" width="350" height="170" rx="14"/>
+  <text class="ttl on-a" x="565" y="40" text-anchor="middle">Job：完成即止</text>
+  <rect class="bx" x="410" y="60" width="140" height="40" rx="8"/><text class="sm" x="480" y="85" text-anchor="middle">Pod 成功退出（0）</text>
+  <rect class="bx-g" x="590" y="60" width="130" height="40" rx="8"/><text class="sm on-g" x="655" y="85" text-anchor="middle">记一次完成 ✓</text>
+  <path class="ln" d="M552 80 H586" marker-end="url(#ar)"/>
+  <text class="sm" x="565" y="132" text-anchor="middle">期望状态：「成功完成 N 次」</text>
+  <text class="sm" x="565" y="152" text-anchor="middle">restartPolicy 只能是 OnFailure 或 Never</text>
+</svg>
+<figcaption>图 20-2　同样是 Pod 退出，两种控制器的反应截然相反</figcaption>
+</figure>
+
+<h3>最简单的 Job</h3>
+
+<div class="code" data-lang="yaml" data-file="extras/workloads/job-pi.yml">
+<pre>
+apiVersion: batch/v1             # Job 在 batch API 组
+kind: Job
+metadata:
+  name: pi
+spec:
+  backoffLimit: 4                # 失败重试最多 4 次
+  ttlSecondsAfterFinished: 600   # 完成 10 分钟后自动删除 Job 和它的 Pod
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: pi
+        image: perl:5.34
+        command: ["perl", "-Mbignum=bpi", "-wle", "print bpi(2000)"]   # 计算圆周率到 2000 位
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ cd extras/workloads
+$ kubectl apply -f job-pi.yml
+job.batch/pi created
+
+$ kubectl get jobs --watch
+NAME   STATUS     COMPLETIONS   DURATION   AGE
+pi     Running    0/1           10s        10s
+pi     Complete   1/1           42s        42s
+
+$ kubectl get pods -l job-name=pi
+NAME       READY   STATUS      RESTARTS   AGE
+pi-7xk2m   0/1     Completed   0          50s
+
+$ kubectl logs job/pi | head -c 60
+3.14159265358979323846264338327950288419716939937510582097
+</pre>
+</div>
+
+<p>
+  Pod 的状态是 <code>Completed</code>，而不是 Running。Job 会自动给它的 Pod 打上 <code>job-name</code> 标签，方便查找。
+  完成的 Pod 默认会保留下来供你查看日志，<code>ttlSecondsAfterFinished</code> 让它们在一段时间后被自动清理。
+</p>
+
+<h3>并行与多次完成</h3>
+
+<div class="tw">
+<table>
+  <tr><th>字段</th><th>默认值</th><th>含义</th></tr>
+  <tr><td><code>completions</code></td><td>1</td><td>需要成功完成多少个 Pod</td></tr>
+  <tr><td><code>parallelism</code></td><td>1</td><td>同一时刻最多运行多少个 Pod</td></tr>
+  <tr><td><code>completionMode: Indexed</code></td><td>NonIndexed</td><td>给每个 Pod 分配编号 0…completions-1（环境变量 <code>JOB_COMPLETION_INDEX</code>），适合「每个 Pod 处理一份数据」</td></tr>
+  <tr><td><code>backoffLimit</code></td><td>6</td><td>失败重试次数上限，超过后 Job 失败</td></tr>
+  <tr><td><code>activeDeadlineSeconds</code></td><td>无</td><td>整个 Job 最长运行多久，超时直接失败</td></tr>
+  <tr><td><code>ttlSecondsAfterFinished</code></td><td>无</td><td>完成（成功或失败）后多久自动删除</td></tr>
+</table>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="completions 5、parallelism 2 时 Pod 的执行时间线">
+  <text class="ttl" x="20" y="22">completions: 5，parallelism: 2，completionMode: Indexed</text>
+  <path class="ln" d="M100 180 H740" marker-end="url(#ar)"/>
+  <text class="sm" x="730" y="198" text-anchor="end">时间 →</text>
+  <text class="sm" x="20" y="64">槽位 1</text>
+  <text class="sm" x="20" y="124">槽位 2</text>
+  <rect class="bx-a" x="100" y="44" width="180" height="32" rx="6"/><text class="sm on-a" x="190" y="65" text-anchor="middle">Pod #0</text>
+  <rect class="bx-a" x="290" y="44" width="180" height="32" rx="6"/><text class="sm on-a" x="380" y="65" text-anchor="middle">Pod #2</text>
+  <rect class="bx-a" x="480" y="44" width="180" height="32" rx="6"/><text class="sm on-a" x="570" y="65" text-anchor="middle">Pod #4</text>
+  <rect class="bx-b" x="100" y="104" width="180" height="32" rx="6"/><text class="sm on-b" x="190" y="125" text-anchor="middle">Pod #1</text>
+  <rect class="bx-b" x="290" y="104" width="180" height="32" rx="6"/><text class="sm on-b" x="380" y="125" text-anchor="middle">Pod #3</text>
+  <text class="sm on-g" x="700" y="65" text-anchor="middle">5/5 ✓</text>
+  <text class="sm" x="420" y="162" text-anchor="middle">同时最多 2 个在跑；一个完成，就补上下一个，直到成功完成 5 个</text>
+</svg>
+<figcaption>图 20-3　parallelism 控制并发，completions 控制总量</figcaption>
+</figure>
+
+<div class="code" data-lang="yaml" data-file="extras/workloads/job-parallel.yml（节选）">
+<pre>
+spec:
+  completions: 5
+  parallelism: 2
+  completionMode: Indexed
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: worker
+        image: busybox:1.36
+        command: ["sh", "-c", "echo processing item $JOB_COMPLETION_INDEX; sleep 10; echo item $JOB_COMPLETION_INDEX done"]
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f job-parallel.yml
+$ kubectl get pods -l job-name=batch-indexed --watch
+NAME                    READY   STATUS      RESTARTS   AGE
+batch-indexed-0-x7kq2   1/1     Running     0          3s
+batch-indexed-1-p9wzm   1/1     Running     0          3s
+batch-indexed-0-x7kq2   0/1     Completed   0          14s
+batch-indexed-2-m4rt8   1/1     Running     0          1s
+...
+
+$ kubectl logs batch-indexed-2-m4rt8
+processing item 2
+item 2 done
+
+$ kubectl get job batch-indexed
+NAME            STATUS     COMPLETIONS   DURATION   AGE
+batch-indexed   Complete   5/5           36s        40s
+</pre>
+</div>
+
+<h3>失败了会怎样</h3>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f job-fail.yml           # 每次都 exit 1，backoffLimit: 2
+
+$ kubectl get pods -l job-name=always-fails
+NAME                 READY   STATUS   RESTARTS   AGE
+always-fails-5kq8z   0/1     Error    0          60s
+always-fails-h2m9x   0/1     Error    0          50s
+always-fails-w7pqt   0/1     Error    0          30s     # 1 次 + 重试 2 次 = 3 个失败的 Pod
+
+$ kubectl describe job always-fails
+...
+Events:
+  Warning  BackoffLimitExceeded  10s  job-controller  Job has reached the specified backoff limit
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; restartPolicy 的两种选择</div>
+  <ul>
+    <li><code>Never</code>：失败后创建<strong>新的 Pod</strong> 重试，每次失败的 Pod 都留着，方便逐个看日志（上面的例子）。</li>
+    <li><code>OnFailure</code>：在<strong>同一个 Pod</strong> 里重启容器，Pod 数量少，但旧的日志只能用 <code>--previous</code> 看最近一次。</li>
+  </ul>
+  <p>重试之间同样有指数退避（10 秒、20 秒、40 秒……），和第 17 章的 CrashLoopBackOff 是一个道理。</p>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl delete -f job-pi.yml -f job-parallel.yml -f job-fail.yml    # 删除 Job 会连带删除它的 Pod
+</pre>
+</div>
+
+<h2 id="cronjob">CronJob：按时间表运行</h2>
+
+<p>CronJob 按照 cron 表达式定期创建 Job。它和 Job、Pod 的关系，与 Deployment、ReplicaSet、Pod 的关系如出一辙：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="CronJob 定时创建 Job，Job 创建 Pod">
+  <rect class="bx-p" x="20" y="70" width="170" height="70" rx="12"/>
+  <text class="ttl on-p" x="105" y="98" text-anchor="middle">CronJob</text>
+  <text class="mono sm" x="105" y="120" text-anchor="middle">*/1 * * * *</text>
+  <rect class="bx-a" x="270" y="14" width="190" height="50" rx="10"/>
+  <text class="sm on-a" x="365" y="36" text-anchor="middle">Job（10:00）</text><text class="sm" x="365" y="54" text-anchor="middle">Complete</text>
+  <rect class="bx-a" x="270" y="80" width="190" height="50" rx="10"/>
+  <text class="sm on-a" x="365" y="102" text-anchor="middle">Job（10:01）</text><text class="sm" x="365" y="120" text-anchor="middle">Complete</text>
+  <rect class="bx-a" x="270" y="146" width="190" height="50" rx="10" stroke-dasharray="5 4"/>
+  <text class="sm on-a" x="365" y="168" text-anchor="middle">Job（10:02）</text><text class="sm" x="365" y="186" text-anchor="middle">Running</text>
+  <rect class="bx" x="540" y="20" width="120" height="38" rx="8"/><text class="sm" x="600" y="44" text-anchor="middle">Pod Completed</text>
+  <rect class="bx" x="540" y="86" width="120" height="38" rx="8"/><text class="sm" x="600" y="110" text-anchor="middle">Pod Completed</text>
+  <rect class="bx" x="540" y="152" width="120" height="38" rx="8"/><text class="sm" x="600" y="176" text-anchor="middle">Pod Running</text>
+  <path class="ln-p" d="M192 95 L266 40" marker-end="url(#ar)"/>
+  <path class="ln-p" d="M192 105 H266" marker-end="url(#ar)"/>
+  <path class="ln-p" d="M192 115 L266 170" marker-end="url(#ar)"/>
+  <path class="ln" d="M462 39 H536" marker-end="url(#ar)"/>
+  <path class="ln" d="M462 105 H536" marker-end="url(#ar)"/>
+  <path class="ln" d="M462 171 H536" marker-end="url(#ar)"/>
+  <text class="sm" x="710" y="100" text-anchor="middle">旧的 Job</text>
+  <text class="sm" x="710" y="118" text-anchor="middle">按历史上限</text>
+  <text class="sm" x="710" y="136" text-anchor="middle">自动清理</text>
+</svg>
+<figcaption>图 20-4　CronJob → Job → Pod，三层嵌套</figcaption>
+</figure>
+
+<h3>cron 表达式</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 170" role="img" aria-label="cron 表达式五个字段的含义">
+  <text class="mono ttl" x="380" y="44" text-anchor="middle" style="font-size:24px"><tspan class="on-r">30</tspan>  <tspan class="on-a">2</tspan>  <tspan class="on-g">*</tspan>  <tspan class="on-b">*</tspan>  <tspan class="on-p">1-5</tspan></text>
+  <text class="sm on-r" x="160" y="90" text-anchor="middle">分钟</text><text class="sm" x="160" y="108" text-anchor="middle">0–59</text>
+  <text class="sm on-a" x="270" y="90" text-anchor="middle">小时</text><text class="sm" x="270" y="108" text-anchor="middle">0–23</text>
+  <text class="sm on-g" x="380" y="90" text-anchor="middle">日</text><text class="sm" x="380" y="108" text-anchor="middle">1–31</text>
+  <text class="sm on-b" x="490" y="90" text-anchor="middle">月</text><text class="sm" x="490" y="108" text-anchor="middle">1–12</text>
+  <text class="sm on-p" x="600" y="90" text-anchor="middle">星期</text><text class="sm" x="600" y="108" text-anchor="middle">0–6（0 = 周日）</text>
+  <path class="ln-r" d="M318 52 L170 76"/><path class="ln-a" d="M346 52 L276 76"/><path class="ln-g" d="M380 52 V76"/><path class="ln-b" d="M412 52 L484 76"/><path class="ln-p" d="M448 52 L592 76"/>
+  <text class="sm" x="380" y="146" text-anchor="middle">示例含义：每周一到周五的 02:30 运行。* 表示「每个」，*/5 表示「每隔 5」，1-5 表示范围</text>
+</svg>
+<figcaption>图 20-5　五个字段：分 时 日 月 周</figcaption>
+</figure>
+
+<div class="tw">
+<table>
+  <tr><th>表达式</th><th>含义</th></tr>
+  <tr><td><code>*/1 * * * *</code></td><td>每分钟</td></tr>
+  <tr><td><code>0 * * * *</code></td><td>每小时整点</td></tr>
+  <tr><td><code>0 3 * * *</code></td><td>每天凌晨 3 点</td></tr>
+  <tr><td><code>0 9 * * 1</code></td><td>每周一上午 9 点</td></tr>
+  <tr><td><code>0 0 1 * *</code></td><td>每月 1 号零点</td></tr>
+</table>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 时区</div>
+  <p>
+    不设置时，时间按 kube-controller-manager 所在的时区解释，托管集群上通常是 UTC。
+    用 <code>spec.timeZone</code>（例如 <code>"Asia/Shanghai"</code>）明确指定，免得「凌晨 3 点的备份」实际在上午 11 点运行。
+  </p>
+</div>
+
+<h3>示例与关键字段</h3>
+
+<div class="code" data-lang="yaml" data-file="extras/workloads/cronjob.yml">
+<pre>
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: hello-cron
+spec:
+  schedule: "*/1 * * * *"            # 每分钟
+  timeZone: "Etc/UTC"
+  concurrencyPolicy: Forbid          # 上一次还没跑完，就跳过这一次
+  startingDeadlineSeconds: 30        # 错过预定时间 30 秒以上就不补跑
+  successfulJobsHistoryLimit: 3      # 保留最近 3 个成功的 Job
+  failedJobsHistoryLimit: 1          # 保留最近 1 个失败的 Job
+  jobTemplate:                       # ↓ 以下就是一个 Job 的 spec
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+          - name: hello
+            image: busybox:1.36
+            command: ["sh", "-c", "date; echo hello from a CronJob"]
+</pre>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th>concurrencyPolicy</th><th>上一次还在运行时，到了下一个时间点</th><th>适合</th></tr>
+  <tr><td><code>Allow</code>（默认）</td><td>照常启动，两次同时运行</td><td>彼此独立、可以重叠的任务</td></tr>
+  <tr><td><code>Forbid</code></td><td>跳过这一次</td><td>备份、数据同步等不能同时跑的任务</td></tr>
+  <tr><td><code>Replace</code></td><td>停掉上一次，启动新的</td><td>只关心最新一次结果的任务</td></tr>
+</table>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f cronjob.yml
+$ kubectl get cronjob hello-cron
+NAME         SCHEDULE      TIMEZONE   SUSPEND   ACTIVE   LAST SCHEDULE   AGE
+hello-cron   */1 * * * *   Etc/UTC    False     0        25s             3m
+
+$ kubectl get jobs
+NAME                  STATUS     COMPLETIONS   DURATION   AGE
+hello-cron-29384510   Complete   1/1           4s         2m25s
+hello-cron-29384511   Complete   1/1           3s         85s
+hello-cron-29384512   Complete   1/1           4s         25s
+
+$ kubectl logs job/hello-cron-29384512
+Wed Oct 29 10:12:00 UTC 2026
+hello from a CronJob
+</pre>
+</div>
+
+<p>两个日常很有用的操作：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+# 不等时间表，立刻手动触发一次（测试 CronJob 时特别方便）
+$ kubectl create job hello-manual --from=cronjob/hello-cron
+
+# 暂停 / 恢复调度（已经在跑的不受影响）
+$ kubectl patch cronjob hello-cron -p '{"spec":{"suspend":true}}'
+$ kubectl patch cronjob hello-cron -p '{"spec":{"suspend":false}}'
+
+$ kubectl delete -f cronjob.yml
+$ kubectl delete job hello-manual
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 任务要能重复执行</div>
+  <p>
+    在少数情况下（比如控制器重启、节点故障），同一个时间点的任务可能被创建两次，也可能被跳过。
+    所以 CronJob 的任务最好是<strong>幂等</strong>的：重复执行一次也不会出错，比如「把今天的数据同步过去」而不是「把计数器加一」。
+  </p>
+</div>
+
+<h2 id="daemonset">DaemonSet：每个节点一个</h2>
+
+<p>
+  有些程序必须在<strong>每个节点</strong>上都运行一份：采集节点日志的代理、上报节点指标的监控代理、网络插件、存储插件……
+  DaemonSet 保证每个（符合条件的）节点上恰好运行一个它的 Pod：新节点加入时自动补上，节点移除时自动回收。
+  你其实早就在用了——很多集群里的 kube-proxy 和 CNI 网络插件就是以 DaemonSet 运行的。
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl get daemonsets -n kube-system
+NAME         DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR            AGE
+kindnet      3         3         3       3            3           kubernetes.io/os=linux   2d
+kube-proxy   3         3         3       3            3           kubernetes.io/os=linux   2d
+</pre>
+</div>
+
+<p>（上面是 kind 集群的输出，你的集群里的名字可能不同，比如云上集群可能看到 Cilium、云厂商的存储插件等。）</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 260" role="img" aria-label="DaemonSet 在每个节点运行一个 Pod，控制平面节点需要容忍污点">
+  <rect class="bx-p" x="270" y="14" width="220" height="50" rx="12"/>
+  <text class="ttl on-p" x="380" y="44" text-anchor="middle">DaemonSet node-agent</text>
+
+  <rect class="bx-r" x="20" y="100" width="170" height="130" rx="12"/>
+  <text class="lbl" x="105" y="122" text-anchor="middle">控制平面节点</text>
+  <text class="mono sm on-r" x="105" y="142" text-anchor="middle">污点 NoSchedule</text>
+  <rect class="bx-a" x="40" y="156" width="130" height="34" rx="6"/><text class="sm on-a" x="105" y="178" text-anchor="middle">agent（有容忍）</text>
+  <text class="sm" x="105" y="214" text-anchor="middle">没有容忍就不会来</text>
+
+  <rect class="bx" x="210" y="100" width="160" height="130" rx="12"/>
+  <text class="lbl" x="290" y="122" text-anchor="middle">工作节点 1</text>
+  <rect class="bx-a" x="225" y="156" width="130" height="34" rx="6"/><text class="sm on-a" x="290" y="178" text-anchor="middle">agent</text>
+  <rect class="bx" x="390" y="100" width="160" height="130" rx="12"/>
+  <text class="lbl" x="470" y="122" text-anchor="middle">工作节点 2</text>
+  <rect class="bx-a" x="405" y="156" width="130" height="34" rx="6"/><text class="sm on-a" x="470" y="178" text-anchor="middle">agent</text>
+  <rect class="bx-g" x="570" y="100" width="170" height="130" rx="12" stroke-dasharray="6 4"/>
+  <text class="lbl on-g" x="655" y="122" text-anchor="middle">新加入的节点</text>
+  <rect class="bx-a" x="590" y="156" width="130" height="34" rx="6" stroke-dasharray="4 3"/><text class="sm on-a" x="655" y="178" text-anchor="middle">agent（自动补上）</text>
+
+  <path class="ln-p" d="M320 66 L120 96" marker-end="url(#ar)"/>
+  <path class="ln-p" d="M360 66 L295 96" marker-end="url(#ar)"/>
+  <path class="ln-p" d="M400 66 L465 96" marker-end="url(#ar)"/>
+  <path class="ln-p" d="M440 66 L640 96" marker-end="url(#ar)"/>
+  <text class="sm" x="380" y="252" text-anchor="middle">没有 replicas 字段：Pod 数量 = 符合条件的节点数</text>
+</svg>
+<figcaption>图 20-6　DaemonSet 的副本数由节点数决定</figcaption>
+</figure>
+
+<div class="code" data-lang="yaml" data-file="extras/workloads/daemonset.yml">
+<pre>
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-agent
+spec:
+  selector:
+    matchLabels:
+      app: node-agent
+  updateStrategy:
+    type: RollingUpdate            # 更新时逐个节点替换
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: node-agent
+    spec:
+      tolerations:                 # 容忍控制平面节点的污点，也在那里运行
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+      containers:
+      - name: agent
+        image: busybox:1.36
+        command: ["sh", "-c", "while true; do echo \"agent running on node $NODE_NAME\"; sleep 30; done"]
+        env:
+        - name: NODE_NAME          # 把所在节点的名字注入环境变量
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        resources:
+          requests:
+            cpu: 10m
+            memory: 16Mi
+          limits:
+            memory: 32Mi
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 两个新面孔</div>
+  <ul>
+    <li><strong>tolerations（容忍）</strong>：控制平面节点通常带有 <code>node-role.kubernetes.io/control-plane:NoSchedule</code> 污点，普通 Pod 不会被调度上去（第 2 章说过生产环境一般不在控制平面上跑业务）。日志、监控代理往往需要覆盖所有节点，所以加上对应的容忍。</li>
+    <li><strong>fieldRef（Downward API）</strong>：把 Pod 自身的信息（这里是所在节点名）注入环境变量，应用不用访问 API 服务器就能知道自己在哪个节点上。</li>
+  </ul>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl apply -f daemonset.yml
+$ kubectl get daemonset node-agent
+NAME         DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR   AGE
+node-agent   3         3         3       3            3           &lt;none&gt;          20s
+
+$ kubectl get pods -l app=node-agent -o wide
+NAME               READY   STATUS    RESTARTS   AGE   IP           NODE
+node-agent-4kx9p   1/1     Running   0          20s   10.244.0.7   desktop-control-plane
+node-agent-h7qm2   1/1     Running   0          20s   10.244.1.9   desktop-worker
+node-agent-t2wzr   1/1     Running   0          20s   10.244.2.6   desktop-worker2
+
+$ kubectl logs node-agent-h7qm2
+agent running on node desktop-worker
+</pre>
+</div>
+
+<p>试着删掉 YAML 里的 <code>tolerations</code> 再 apply，DESIRED 会变成 2：控制平面节点上的那个 Pod 被移除了。</p>
+
+<h3>只在部分节点上运行</h3>
+<p>用第 4 章讲过的 <code>nodeSelector</code> 或节点亲和性，可以让 DaemonSet 只覆盖带特定标签的节点，比如只在有 GPU 的节点上运行 GPU 监控代理：</p>
+
+<div class="code" data-lang="yaml">
+<pre>
+    spec:
+      nodeSelector:
+        hardware: gpu              # 只在带有 hardware=gpu 标签的节点上运行
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl label node desktop-worker hardware=gpu     # 给节点打标签，DaemonSet 会自动在它上面创建 Pod
+$ kubectl label node desktop-worker hardware-        # 去掉标签，Pod 会被自动移除
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ kubectl delete -f daemonset.yml
+</pre>
+</div>
+
+<h2 id="compare">五种控制器对比</h2>
+
+<div class="tw">
+<table>
+  <tr><th></th><th>Deployment</th><th>StatefulSet</th><th>DaemonSet</th><th>Job</th><th>CronJob</th></tr>
+  <tr><td>API 组</td><td>apps/v1</td><td>apps/v1</td><td>apps/v1</td><td>batch/v1</td><td>batch/v1</td></tr>
+  <tr><td>Pod 数量由谁决定</td><td><code>replicas</code></td><td><code>replicas</code></td><td>符合条件的节点数</td><td><code>completions</code></td><td>每次运行一个 Job</td></tr>
+  <tr><td>Pod 退出后</td><td>重启 / 替换</td><td>重启 / 替换（同名）</td><td>重启 / 替换</td><td>成功则完成，失败则重试</td><td>同 Job</td></tr>
+  <tr><td>Pod 名字</td><td>随机</td><td>固定序号</td><td>随机</td><td>随机（Indexed 模式带序号）</td><td>随机</td></tr>
+  <tr><td>典型用途</td><td>Web、API</td><td>数据库</td><td>日志、监控代理</td><td>迁移、批处理</td><td>备份、清理</td></tr>
+</table>
+</div>
+
+<h2 id="summary">小结</h2>
+<ul>
+  <li>Job 确保 N 个 Pod 成功完成；<code>completions</code> 控制总量，<code>parallelism</code> 控制并发，<code>backoffLimit</code> 控制重试，<code>ttlSecondsAfterFinished</code> 负责自动清理。</li>
+  <li>CronJob 按 cron 表达式定期创建 Job；注意时区、并发策略和历史保留，任务尽量设计成幂等。</li>
+  <li>DaemonSet 在每个符合条件的节点上运行一个 Pod，新节点自动补上；常配合容忍和 nodeSelector 使用。</li>
+  <li>五种工作负载控制器共享同一套「资源 + 控制器 + 调和循环」的架构，区别只在于它们维护的期望状态不同。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>把 <code>job-parallel.yml</code> 的 <code>parallelism</code> 改成 5，比较 Job 的 DURATION。</li>
+    <li>写一个 CronJob，每 2 分钟运行一次，任务本身 <code>sleep 180</code>。分别用 <code>Allow</code>、<code>Forbid</code>、<code>Replace</code> 三种并发策略，观察 <code>kubectl get jobs</code> 的变化。</li>
+    <li>修改 <code>daemonset.yml</code> 的镜像为 <code>busybox:1.37</code> 并 apply，用 <code>kubectl rollout status ds/node-agent</code> 观察 DaemonSet 的滚动更新。</li>
+    <li>回顾第 19 章：如果要每天凌晨给你的 Web 应用清理一次临时文件，你会用哪种控制器？YAML 怎么写？</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>
